@@ -1,48 +1,60 @@
-package main
+package main // Note: Change this to 'package extractor' if placing in a specific pkg/extractor folder
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
-// ExtractText routes the file to the appropriate parser strictly based on its extension.
-// IMPORTANT: This function assumes that upstream validation (like a FileWatcher)
-// has already verified the file is safe, not a disguised executable, and within size limits.
-func ExtractText(filePath string) (string, error) {
+// -----------------------------------------------------------------------
+// GLOBAL VARIABLES & REGEX COMPILATION
+// -----------------------------------------------------------------------
+// We pre-compile these regular expressions when the application starts.
+// Compiling regex inside a function that runs on every file would cause massive performance lag.
+var (
+	// Matches 3 or more consecutive newlines to squash giant blank pages
+	multipleNewlinesRegex = regexp.MustCompile(`\n{3,}`)
+	// Matches sequences of spaces or tabs to squash massive horizontal gaps
+	multipleSpacesRegex = regexp.MustCompile(`[ \t]+`)
+)
 
-	// -------------------------------------------------------------------
-	// STEP 1: EXTRACT AND NORMALIZE THE EXTENSION
-	// -------------------------------------------------------------------
-	// We grab the extension from the file path and convert it to lowercase.
-	// This ensures that files named "document.PDF" and "document.pdf"
-	// are treated exactly the same way.
+// -----------------------------------------------------------------------
+// MAIN EXTRACTOR FUNCTION
+// -----------------------------------------------------------------------
+
+// ExtractText takes a physical file path and routes it to the appropriate text parser.
+//
+// ARCHITECTURAL NOTE:
+// This function operates on a "Trust but Verify" model. It assumes that upstream
+// validation (e.g., FileWatcher) has already confirmed the file exists, is under
+// the 100MB size limit, and is not a hidden/system file.
+func ExtractText(filePath string) (string, error) {
+	// 1. NORMALIZE EXTENSION
+	// Extract the extension and force lowercase (e.g., "Report.PDF" -> ".pdf").
+	// This prevents the switch statement from failing due to weird capitalization.
 	ext := strings.ToLower(filepath.Ext(filePath))
 
-	// -------------------------------------------------------------------
-	// STEP 2: ROUTE BASED ON EXTENSION
-	// -------------------------------------------------------------------
-	// We strictly handle ONLY the extensions explicitly defined in our project scope.
+	var rawText string
+	var parseErr error
+
+	// 2. ROUTING
+	// Strictly handle ONLY the extensions explicitly defined in our project scope.
 	switch ext {
-
 	case ".pdf":
-		return parsePDF(filePath)
-
+		rawText, parseErr = parsePDF(filePath)
 	case ".docx":
-		return parseDocx(filePath)
-
+		rawText, parseErr = parseDocx(filePath)
 	case ".pptx":
-		return parsePptx(filePath)
-
+		rawText, parseErr = parsePptx(filePath)
 	case ".txt", ".md":
-		return parsePlainText(filePath)
+		rawText, parseErr = parsePlainText(filePath)
 
-	// -------------------------------------------------------------------
-	// STEP 3: THE DEFAULT CATCH-ALL (DETAILED ERROR HANDLING)
-	// -------------------------------------------------------------------
+	// 3. THE CATCH-ALL REJECTION
+	// If a file slips past the FileWatcher (e.g., .csv, .mp4, .jpg), it lands here.
 	default:
-		// Edge Case: The file has no extension at all (e.g., "Makefile" or a corrupted name).
+		// Edge Case: The file has no extension at all (e.g., "Makefile").
 		if ext == "" {
 			return "", fmt.Errorf(
 				"extraction error: file '%s' has no extension. "+
@@ -51,9 +63,7 @@ func ExtractText(filePath string) (string, error) {
 			)
 		}
 
-		// The Catch-All: This is where images, videos, CSVs, and unknown formats land.
-		// We provide a highly verbose error so future developers know exactly why it was rejected,
-		// and what steps they need to take if they want to add support for it later.
+		// Verbose error to help future developers debug unsupported file drops.
 		return "", fmt.Errorf(
 			"extraction error: unsupported file extension '%s' for file '%s'. "+
 				"Note: Media files (images/videos) and tabular data (like .csv) are intentionally "+
@@ -62,10 +72,55 @@ func ExtractText(filePath string) (string, error) {
 			ext, filePath, ext,
 		)
 	}
+
+	// If the specific parser failed (e.g., corrupted PDF), bubble the error up
+	if parseErr != nil {
+		return "", fmt.Errorf("failed to parse %s file: %w", ext, parseErr)
+	}
+
+	// 4. SANITIZATION (The Janitor)
+	// Extracted text from documents is often incredibly messy. We must clean it
+	// before it reaches the chunker or the vector database.
+	cleanedText := sanitizeText(rawText)
+
+	// Ensure we aren't returning an empty string if a document was purely images
+	// or empty space that got scrubbed away.
+	if len(cleanedText) == 0 {
+		return "", fmt.Errorf("extraction error: file '%s' contained no readable text", filePath)
+	}
+
+	return cleanedText, nil
 }
 
 // -----------------------------------------------------------------------
-// PARSER FUNCTIONS
+// SANITIZATION LOGIC
+// -----------------------------------------------------------------------
+
+// sanitizeText scrubs raw parsed text to ensure it is safe for vector embeddings
+// and SQLite C-bindings.
+func sanitizeText(input string) string {
+	// CRITICAL: Strip null bytes (\x00). C-bindings (like sqlite-vec) interpret
+	// null bytes as the absolute end of a string. If left in, they will silently
+	// truncate the document in the database.
+	cleaned := strings.ReplaceAll(input, "\x00", "")
+
+	// Ensure the string is valid UTF-8, dropping any broken byte sequences.
+	cleaned = strings.ToValidUTF8(cleaned, "")
+
+	// Standardize line endings from Windows (\r\n) or old Mac (\r) to Unix (\n).
+	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
+
+	// Condense massive blocks of empty space (saves AI embedding tokens).
+	cleaned = multipleNewlinesRegex.ReplaceAllString(cleaned, "\n\n")
+	cleaned = multipleSpacesRegex.ReplaceAllString(cleaned, " ")
+
+	// Remove trailing/leading whitespace from the very ends of the document.
+	return strings.TrimSpace(cleaned)
+}
+
+// -----------------------------------------------------------------------
+// PARSER STUB FUNCTIONS
 // -----------------------------------------------------------------------
 
 // parsePDF extracts text from standard PDF documents.
@@ -88,8 +143,9 @@ func parsePptx(path string) (string, error) {
 
 // parsePlainText reads the entire contents of standard text files (.txt, .md).
 func parsePlainText(path string) (string, error) {
-	// os.ReadFile loads the whole file into memory.
-	// This is safe here because the upstream FileWatcher enforces a strict size limit.
+	// os.ReadFile loads the entire file into memory at once.
+	// This is safe to use here because the upstream FileWatcher strictly
+	// prevents files over 100MB from reaching this function.
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read plain text file '%s': %w", path, err)
