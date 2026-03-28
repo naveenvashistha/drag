@@ -1,4 +1,4 @@
-package main // Note: Change this to 'package extractor' if placing in a specific pkg/extractor folder
+package extractor // Note: Change this to 'package extractor' if placing in a specific pkg/extractor folder
 
 import (
 	"fmt"
