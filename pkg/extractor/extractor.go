@@ -1,46 +1,48 @@
-package extractor // Note: Change this to 'package extractor' if placing in a specific pkg/extractor folder
+package extractor
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	// Third-party library for PDF parsing
+	"github.com/ledongthuc/pdf"
 )
 
 // -----------------------------------------------------------------------
-// GLOBAL VARIABLES & REGEX COMPILATION
+// GLOBAL VARIABLES
 // -----------------------------------------------------------------------
-// We pre-compile these regular expressions when the application starts.
-// Compiling regex inside a function that runs on every file would cause massive performance lag.
+
 var (
-	// Matches 3 or more consecutive newlines to squash giant blank pages
+	ErrEmptyContent = errors.New("extraction error: file contained no readable text")
+
 	multipleNewlinesRegex = regexp.MustCompile(`\n{3,}`)
-	// Matches sequences of spaces or tabs to squash massive horizontal gaps
-	multipleSpacesRegex = regexp.MustCompile(`[ \t]+`)
+	multipleSpacesRegex   = regexp.MustCompile(`[ \t]+`)
+
+	// pdfBrokenWordRegex repairs coordinate-based word tearing common in PDFs (e.g., "M\nain" -> "Main")
+	pdfBrokenWordRegex = regexp.MustCompile(`([a-zA-Z])\n([a-zA-Z])`)
+
+	// pdfHyphenRegex repairs hyphenated line breaks (e.g., "pipe-\nline" -> "pipeline")
+	pdfHyphenRegex = regexp.MustCompile(`([a-zA-Z])-\n([a-zA-Z])`)
 )
 
 // -----------------------------------------------------------------------
-// MAIN EXTRACTOR FUNCTION
+// MAIN EXTRACTOR
 // -----------------------------------------------------------------------
 
-// ExtractText takes a physical file path and routes it to the appropriate text parser.
-//
-// ARCHITECTURAL NOTE:
-// This function operates on a "Trust but Verify" model. It assumes that upstream
-// validation (e.g., FileWatcher) has already confirmed the file exists, is under
-// the 100MB size limit, and is not a hidden/system file.
 func ExtractText(filePath string) (string, error) {
-	// 1. NORMALIZE EXTENSION
-	// Extract the extension and force lowercase (e.g., "Report.PDF" -> ".pdf").
-	// This prevents the switch statement from failing due to weird capitalization.
 	ext := strings.ToLower(filepath.Ext(filePath))
 
 	var rawText string
 	var parseErr error
 
-	// 2. ROUTING
-	// Strictly handle ONLY the extensions explicitly defined in our project scope.
 	switch ext {
 	case ".pdf":
 		rawText, parseErr = parsePDF(filePath)
@@ -50,43 +52,25 @@ func ExtractText(filePath string) (string, error) {
 		rawText, parseErr = parsePptx(filePath)
 	case ".txt", ".md":
 		rawText, parseErr = parsePlainText(filePath)
-
-	// 3. THE CATCH-ALL REJECTION
-	// If a file slips past the FileWatcher (e.g., .csv, .mp4, .jpg), it lands here.
 	default:
-		// Edge Case: The file has no extension at all (e.g., "Makefile").
 		if ext == "" {
-			return "", fmt.Errorf(
-				"extraction error: file '%s' has no extension. "+
-					"The extractor requires a valid extension to determine the parsing strategy.",
-				filePath,
-			)
+			return "", fmt.Errorf("extraction error: file '%s' has no extension", filepath.Base(filePath))
 		}
-
-		// Verbose error to help future developers debug unsupported file drops.
 		return "", fmt.Errorf(
-			"extraction error: unsupported file extension '%s' for file '%s'. "+
-				"Note: Media files (images/videos) and tabular data (like .csv) are intentionally "+
-				"outside the current extraction scope. If '%s' should be supported, please add it "+
-				"to the validExts whitelist in the FileWatcher AND implement a corresponding parser here.",
-			ext, filePath, ext,
+			"extraction skipped for '%s': unsupported extension '%s'.\n"+
+				"-> Allowed extensions are: .txt, .md, .pdf, .docx, .pptx.",
+			filepath.Base(filePath), ext,
 		)
 	}
 
-	// If the specific parser failed (e.g., corrupted PDF), bubble the error up
 	if parseErr != nil {
 		return "", fmt.Errorf("failed to parse %s file: %w", ext, parseErr)
 	}
 
-	// 4. SANITIZATION (The Janitor)
-	// Extracted text from documents is often incredibly messy. We must clean it
-	// before it reaches the chunker or the vector database.
 	cleanedText := sanitizeText(rawText)
 
-	// Ensure we aren't returning an empty string if a document was purely images
-	// or empty space that got scrubbed away.
 	if len(cleanedText) == 0 {
-		return "", fmt.Errorf("extraction error: file '%s' contained no readable text", filePath)
+		return "", ErrEmptyContent
 	}
 
 	return cleanedText, nil
@@ -96,59 +80,171 @@ func ExtractText(filePath string) (string, error) {
 // SANITIZATION LOGIC
 // -----------------------------------------------------------------------
 
-// sanitizeText scrubs raw parsed text to ensure it is safe for vector embeddings
-// and SQLite C-bindings.
 func sanitizeText(input string) string {
-	// CRITICAL: Strip null bytes (\x00). C-bindings (like sqlite-vec) interpret
-	// null bytes as the absolute end of a string. If left in, they will silently
-	// truncate the document in the database.
 	cleaned := strings.ReplaceAll(input, "\x00", "")
-
-	// Ensure the string is valid UTF-8, dropping any broken byte sequences.
 	cleaned = strings.ToValidUTF8(cleaned, "")
-
-	// Standardize line endings from Windows (\r\n) or old Mac (\r) to Unix (\n).
 	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
 	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
-
-	// Condense massive blocks of empty space (saves AI embedding tokens).
 	cleaned = multipleNewlinesRegex.ReplaceAllString(cleaned, "\n\n")
 	cleaned = multipleSpacesRegex.ReplaceAllString(cleaned, " ")
-
-	// Remove trailing/leading whitespace from the very ends of the document.
 	return strings.TrimSpace(cleaned)
 }
 
 // -----------------------------------------------------------------------
-// PARSER STUB FUNCTIONS
+// FULLY IMPLEMENTED PARSERS
 // -----------------------------------------------------------------------
 
-// parsePDF extracts text from standard PDF documents.
-func parsePDF(path string) (string, error) {
-	// TODO: Implement actual PDF extraction (e.g., using github.com/ledongthuc/pdf)
-	return "Extracted PDF content from " + path, nil
-}
-
-// parseDocx extracts text from Microsoft Word (.docx) documents.
-func parseDocx(path string) (string, error) {
-	// TODO: Implement actual DOCX extraction (e.g., using baliance.com/gooxml)
-	return "Extracted DOCX content from " + path, nil
-}
-
-// parsePptx extracts text from Microsoft PowerPoint (.pptx) presentations.
-func parsePptx(path string) (string, error) {
-	// TODO: Implement actual PPTX extraction
-	return "Extracted PPTX content from " + path, nil
-}
-
-// parsePlainText reads the entire contents of standard text files (.txt, .md).
+// parsePlainText reads the entire contents of standard text files.
 func parsePlainText(path string) (string, error) {
-	// os.ReadFile loads the entire file into memory at once.
-	// This is safe to use here because the upstream FileWatcher strictly
-	// prevents files over 100MB from reaching this function.
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("failed to read plain text file '%s': %w", path, err)
+		return "", err
 	}
 	return string(content), nil
+}
+
+// parsePDF extracts raw text from PDF documents using a lightweight library
+// and aggressively resolves PDF-specific text formatting artifacts.
+func parsePDF(path string) (string, error) {
+	// Open the PDF file
+	f, r, err := pdf.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	// Extract the plain text from the reader
+	var buf bytes.Buffer
+	b, err := r.GetPlainText()
+	if err != nil {
+		return "", err
+	}
+	buf.ReadFrom(b)
+
+	rawPDFText := buf.String()
+
+	// 1. Resolve hyphenated line breaks ("pipe-\nline" -> "pipeline")
+	rawPDFText = pdfHyphenRegex.ReplaceAllString(rawPDFText, "$1$2")
+
+	// 2. Resolve coordinate-torn words ("k\naise" -> "kaise")
+	rawPDFText = pdfBrokenWordRegex.ReplaceAllString(rawPDFText, "$1$2")
+
+	// 3. Flatten remaining newlines into standard spaces
+	rawPDFText = strings.ReplaceAll(rawPDFText, "\n", " ")
+
+	return rawPDFText, nil
+}
+
+// parseDocx treats the .docx file as a ZIP archive, locates the document.xml,
+// and extracts all text nodes.
+func parseDocx(path string) (string, error) {
+	// Open the docx as a zip file
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	// Search for the main document XML file inside the zip
+	for _, f := range r.File {
+		if f.Name == "word/document.xml" {
+			rc, err := f.Open()
+			if err != nil {
+				return "", err
+			}
+			defer rc.Close()
+
+			return extractXMLText(rc)
+		}
+	}
+	return "", errors.New("invalid docx format: word/document.xml not found")
+}
+
+// parsePptx treats the .pptx file as a ZIP archive, iterates through all
+// slide XML files, and extracts their text nodes sequentially into a flat string.
+func parsePptx(path string) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	var textBuilder strings.Builder
+
+	// Iterate through all files in the zip to find the slides
+	for _, f := range r.File {
+		// Slides are stored as ppt/slides/slide1.xml, ppt/slides/slide2.xml, etc.
+		if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") {
+			rc, err := f.Open()
+			if err != nil {
+				continue // Skip broken slides rather than failing the whole document
+			}
+
+			slideText, _ := extractXMLText(rc)
+			slideText = strings.TrimSpace(slideText)
+
+			// Only append if the slide actually contained text (ignores blank slides)
+			if len(slideText) > 0 {
+				// Flatten any internal newlines within the slide's text boxes
+				slideText = strings.ReplaceAll(slideText, "\n", " ")
+
+				// Add a single space to separate this slide's text from the next
+				textBuilder.WriteString(slideText + " ")
+			}
+
+			rc.Close()
+		}
+	}
+
+	if textBuilder.Len() == 0 {
+		return "", errors.New("no readable slides found in pptx")
+	}
+
+	return strings.TrimSpace(textBuilder.String()), nil
+}
+
+// -----------------------------------------------------------------------
+// HELPER FUNCTIONS
+// -----------------------------------------------------------------------
+
+// extractXMLText is a high-performance, low-memory stream reader.
+// Instead of loading a massive XML file into memory, it streams the file token
+// by token, pulling out only the raw text strings hidden inside specific tags.
+func extractXMLText(rc io.ReadCloser) (string, error) {
+	decoder := xml.NewDecoder(rc)
+	var textBuilder strings.Builder
+	inTextTag := false
+
+	for {
+		t, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+
+		switch element := t.(type) {
+		case xml.StartElement:
+			// Both Word and PPTX use 't' for text nodes (<w:t> or <a:t>)
+			if element.Name.Local == "t" {
+				inTextTag = true
+			}
+		case xml.EndElement:
+			if element.Name.Local == "t" {
+				inTextTag = false
+			} else if element.Name.Local == "p" {
+				// Both Word and PPTX use 'p' for paragraphs (<w:p> or <a:p>)
+				// Injecting a space here prevents paragraphs from mashing together,
+				// while ensuring heavily formatted single words stay intact.
+				textBuilder.WriteString(" ")
+			}
+		case xml.CharData:
+			if inTextTag {
+				textBuilder.Write(element)
+			}
+		}
+	}
+
+	return textBuilder.String(), nil
 }
