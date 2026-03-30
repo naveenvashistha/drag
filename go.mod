@@ -1,6 +1,6 @@
 module drag
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/emersion/go-autostart v0.0.0-20250403115856-34830d6457d2
@@ -29,6 +29,7 @@ require (
 	github.com/leaanthony/gosod v1.0.4 // indirect
 	github.com/leaanthony/slicer v1.6.0 // indirect
 	github.com/leaanthony/u v1.1.1 // indirect
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-sqlite3 v0.32.0 // indirect
