@@ -5,7 +5,7 @@ import (
 	"drag/pkg/system"
 	"embed"
 	"log"
-
+	"drag/pkg/crawler"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -21,14 +21,27 @@ func main() {
 	system.EnableAutoStart()
 
 	// Initialize the database and get a connection pool. We can pass this db connection pool
-	_, db_err := db.InitDB("D:/Naveen/drag/drag/pkg/db")
+	db, db_err := db.InitDB("D:/Naveen/drag/drag/pkg/db")
 
 	if db_err != nil {
 		log.Fatal("Failed to initialize database:", db_err)
 	}
+	defer db.Close() // Ensure the database connection is closed when the main function exits
+
+	watcher, watchErr := crawler.NewFileWatcher(db)
+	if watchErr != nil {
+		log.Fatal("Failed to initialize folder watcher:", watchErr)
+	}
+	defer watcher.Watcher.Close()
+
+	gc := crawler.GarbageCollector{DB: db}
+	
+	rm := crawler.RetryMachine{DB: db, ProcessQueue: watcher.ProcessQueue}
+
+	walker := crawler.FileWalker{DB: db, Watch: watcher}
 
 	// Create an instance of the app structure
-	app := NewApp()
+	app := NewApp(db, watcher, &walker, &gc, &rm)
 
 	// Create application with options
 	err := wails.Run(&options.App{
