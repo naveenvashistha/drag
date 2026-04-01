@@ -185,6 +185,10 @@ func (w *FileWalker) scanPhysicalDrive(root string, fileDBState map[string]struc
 
 	// 2. Walk the physical hard drive
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // Silently skip unreadable paths (Permission Denied)
+		}
+		
 		if folderData, exists := folderDBState[path]; exists{
 			if folderData.status == "ignored" {
 				return filepath.SkipDir
@@ -194,10 +198,6 @@ func (w *FileWalker) scanPhysicalDrive(root string, fileDBState map[string]struc
 					state bool
 				}{folderData.status, true}
 			}
-		}
-		
-		if err != nil {
-			return nil // Silently skip unreadable paths (Permission Denied)
 		}
 
 		info, err := d.Info()
@@ -232,14 +232,34 @@ func (w *FileWalker) scanPhysicalDrive(root string, fileDBState map[string]struc
 		// C. FILE RECONCILIATION LOGIC
 		fileData, exists := fileDBState[path]
 
-		if !exists {
+		if !exists || fileData.Size != info.Size() || fileData.ModTime != info.ModTime().Unix(){
 			// SCENARIO 1: Brand New File
 			// Not in our database, created while the app was closed.
-			w.Watch.ProcessQueue <- path
-		} else if fileData.Size != info.Size() || fileData.ModTime != info.ModTime().Unix() {
-			// SCENARIO 2: Modified File
-			// Exists in DB, but the physical size or timestamp changed offline.
-			w.Watch.ProcessQueue <- path
+			select {
+			case w.Watch.ProcessQueue <- path:
+				// happy path, nothing extra needed
+			default:
+				info, err := os.Stat(path)
+				if err != nil{
+					return nil
+				}
+				// queue is full — persist so a retry job can recover it
+				_, err = w.DB.Exec(`
+					INSERT INTO files (folder_path, path, file_name, size, last_modified, status, retry_count) 
+					VALUES (?, ?, ?, ?, ?, 'pending', 0)
+					ON CONFLICT(path) DO UPDATE SET 
+						size = excluded.size,
+						last_modified = excluded.last_modified,
+						file_hash = NULL, 
+						status = 'pending',
+						retry_count = 0,
+						updated_at = cast(strftime('%s', 'now') as int)`,
+					filepath.Dir(path), path, filepath.Base(path), info.Size(), info.ModTime().Unix())
+				if err != nil {
+					log.Printf("Failed to persist pending file: %s\n", filepath.Base(path))
+					return nil
+				}
+			}
 		}
 
 		// SCENARIO 3: Perfect Match

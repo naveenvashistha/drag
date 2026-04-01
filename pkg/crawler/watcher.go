@@ -20,8 +20,8 @@ import (
 
 // FileWatcher manages fsnotify and background background processing queues
 type FileWatcher struct {
-	DB           *sql.DB
-	Watcher      *fsnotify.Watcher
+	DB           *sql.DB // Access to the SQLite database instance
+	Watcher      *fsnotify.Watcher // 
 	ProcessQueue chan string
 	ctx          context.Context
 	timers     map[string]*time.Timer
@@ -102,7 +102,11 @@ func (w *FileWatcher) routeEvent(event fsnotify.Event) {
 
 	// 4. The Windows "OldName" Fast-Path Rename
 	// If fsnotify gives us the exact old name, we bypass all heuristics.
-	oldName := reflect.ValueOf(event).FieldByName("renamedFrom").String()
+	field := reflect.ValueOf(event).FieldByName("renamedFrom")
+	oldName := ""
+	if field.IsValid() {
+		oldName = field.String()
+	}
 	if event.Has(fsnotify.Create) && oldName != "" {
 		w.handleExactRename(oldName, event.Name, isDir)
 		return
@@ -133,7 +137,31 @@ func (w *FileWatcher) debounce(filePath string) {
 		delete(w.timers, filePath)
 		w.timersLock.Unlock()
 
-		w.ProcessQueue <- filePath // Send to background workers
+		select {
+			case w.ProcessQueue <- filePath:
+				// happy path, nothing extra needed
+			default:
+				info, err := os.Stat(filePath)
+				if err != nil{
+					return
+				}
+				// queue is full — persist so a retry job can recover it
+				_, err = w.DB.Exec(`
+					INSERT INTO files (folder_path, path, file_name, size, last_modified, status, retry_count) 
+					VALUES (?, ?, ?, ?, ?, 'pending', 0)
+					ON CONFLICT(path) DO UPDATE SET 
+						size = excluded.size,
+						last_modified = excluded.last_modified,
+						file_hash = NULL, 
+						status = 'pending',
+						retry_count = 0,
+						updated_at = cast(strftime('%s', 'now') as int)`,
+					filepath.Dir(filePath), filePath, filepath.Base(filePath), info.Size(), info.ModTime().Unix())
+				if err != nil {
+					log.Printf("Failed to persist pending file: %s\n", filepath.Base(filePath))
+					return
+				}
+			}
 	})
 }
 
@@ -164,15 +192,13 @@ func (w *FileWatcher) handleDelete(filePath string, isDir bool) {
 			WHERE path = ? OR path LIKE ?`, now, filePath, childWildcard); err != nil {
 			log.Println("Failed to update missing folders:", err)
 			return
-		} else {
-			log.Println("Soft-deleted path and its children:", filePath)
-			if w.ctx != nil {
-				runtime.EventsEmit(w.ctx, "folder-tree-updated")
-			}
 		}
 	}
 	if err := tx.Commit(); err == nil {
 		log.Println("Safely soft-deleted path and its children:", filePath)
+		if w.ctx != nil {
+			runtime.EventsEmit(w.ctx, "folder-tree-updated")
+		}
 	}
 }
 
@@ -311,7 +337,7 @@ func (w *FileWatcher) processFileFast(newPath string) {
 		rows.Scan(&c.ID, &c.Hash)
 		candidates = append(candidates, c)
 	}
-	rows.Close()
+	defer rows.Close()
 
 	var vecErr error
 	// 2. The Routing Logic
@@ -337,7 +363,7 @@ func (w *FileWatcher) processFileFast(newPath string) {
 	} else {
 		
 		for _, ghost := range candidates {
-			if ghost.Hash == actualHash {
+			if ghost.Hash.Valid && ghost.Hash.String == actualHash {
 				w.claimGhost(newPath, actualHash, ghost.ID, info)
 				return
 			}
@@ -431,9 +457,35 @@ func (w *FileWatcher) isValidTarget(targetPath string, size int64, isDir bool) b
 	// These are massive, auto-generated, or system folders that will crash your 
 	// watcher or pollute your AI database with useless code/cache fragments.
 	ignoredDirs := []string{
-		"node_modules", ".git", ".next", "venv", ".venv", 
-		"__pycache__", ".idea", ".vscode", "build", "dist", 
+    // --- Your existing entries ---
+		"node_modules", ".git", ".next", "venv", ".venv",
+		"__pycache__", ".idea", ".vscode", "build", "dist",
 		"vendor", "coverage", ".cache", "tmp", "temp",
+
+		// --- Windows System (will crash watcher or flood index) ---
+		"windows", "system32", "syswow64", "winsxs",
+		"program files", "program files (x86)",
+		"$recycle.bin", "system volume information",
+		"recovery", "perflogs",
+
+		// --- AppData subfolders (roaming/local caches are enormous) ---
+		"appdata",     // or be more surgical: watch only AppData\Documents subtrees
+
+		// --- More dev tooling you likely missed ---
+		"target",      // Maven / Rust cargo output
+		".gradle",
+		".m2",         // Maven local repo
+		"out",         // IntelliJ output
+		".dart_tool",
+		".pub-cache",
+		".pytest_cache",
+		".mypy_cache",
+		".tox",
+		"site-packages",
+		"__mocks__",
+		"obj",         // .NET build artifacts
+		"packages",    // NuGet / Flutter
+		"bin",         // compiled binaries folder (common in .NET/Java projects)
 	}
 
 	// Reject if the target itself is a blacklisted directory
@@ -452,8 +504,15 @@ func (w *FileWatcher) isValidTarget(targetPath string, size int64, isDir bool) b
 	   strings.HasPrefix(base, "~$") || 
 	   strings.HasSuffix(base, ".tmp") || 
 	   strings.HasSuffix(base, ".crdownload") || 
-	   strings.HasPrefix(base, ".~lock.") {
-		return false
+	   strings.HasPrefix(base, ".~lock.") || 
+	   strings.HasSuffix(base, ".part") ||       // Firefox partial downloads
+	   strings.HasSuffix(base, ".download") ||   // Safari partial downloads  
+	   strings.HasSuffix(base, ".opdownload") ||  // Opera partial downloads
+	   strings.HasSuffix(base, ".~tmp") ||
+	   strings.HasSuffix(base, ".bak") ||        // backup files (usually auto-generated)
+	   strings.HasSuffix(base, ".log") ||  // log files (unless you want them) 
+	   base == "desktop.ini" || base == "thumbs.db" || base == "ntuser.dat"{
+	   return false
 	}
 
 	// 3. STRICT EXTENSION WHITELIST
@@ -472,7 +531,8 @@ func (w *FileWatcher) isValidTarget(targetPath string, size int64, isDir bool) b
 
 	// 4. HARD SIZE LIMIT (100 MB)
 	const maxBytes = 100 * 1024 * 1024
-	if size > maxBytes {
+	const minBytes = 50                  // 50 bytes floor — skip empty/stub files
+	if size > maxBytes || size < minBytes {
 		return false
 	}
 
@@ -534,7 +594,26 @@ func (w *FileWatcher) RunWalker(root string) {
 			// Dump the valid file into the 10,000-capacity worker channel.
 			// The background workers will pick it up, compute the xxHash, 
 			// and seamlessly deduplicate or vectorize it.
-			w.ProcessQueue <- path
+			select {
+				case w.ProcessQueue <- path:
+					// happy path, nothing extra needed
+				default:
+					// queue is full — persist so a retry job can recover it
+					_, err := w.DB.Exec(`
+						INSERT INTO files (folder_path, path, file_name, size, last_modified, status, retry_count) 
+						VALUES (?, ?, ?, ?, ?, 'pending', 0)
+						ON CONFLICT(path) DO UPDATE SET 
+							size = excluded.size,
+							last_modified = excluded.last_modified,
+							file_hash = NULL, 
+							status = 'pending',
+							retry_count = 0,
+							updated_at = cast(strftime('%s', 'now') as int)`,
+						filepath.Dir(path), path, filepath.Base(path), info.Size(), info.ModTime().Unix())
+					if err != nil {
+						log.Printf("Failed to persist pending file: %s\n", filepath.Base(path))
+					}
+				}
 		}
 
 		return nil

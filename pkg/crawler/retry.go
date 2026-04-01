@@ -3,6 +3,8 @@ package crawler
 import (
 	"database/sql"
 	"time"
+	"path/filepath"
+	"os"
 	"log"
 )
 
@@ -29,20 +31,25 @@ func (rm *RetryMachine) runRetry(){
 		SELECT path FROM files 
 		WHERE status = 'pending' AND retry_count > 0 AND retry_count < 3
 	`)
-	if err == nil {
+	if err != nil {
 		return
 	}
+	defer rows.Close()
 
 	var count int
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err == nil {
 			// Drop it back into the worker queue for another attempt!
-			rm.ProcessQueue <- path
+			select {
+			case rm.ProcessQueue <- path:
+				// happy path, nothing extra needed
+			default:
+				log.Printf("Retry Sweeper: Worker queue is full, skipping retry for %s\n", path)
+			}
 			count++
 		}
 	}
-	rows.Close()
 
 	if count > 0 {
 		log.Printf("Retry Sweeper: Queued %d pending files for another attempt.\n", count)
