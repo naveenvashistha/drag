@@ -36,12 +36,12 @@ func (gc *GarbageCollector) runCleanup() {
 	query1 := `
 		DELETE FROM files 
 		WHERE status = 'missing' 
-		AND updated_at <= datetime('now', '-7 days')
+		AND updated_at <= cast(strftime('%s', 'now', '-7 days') as int)
 	`
 	query2 := `
 		DELETE FROM folders
 		WHERE status = 'missing'
-		AND updated_at <= datetime('now', '-7 days')
+		AND updated_at <= cast(strftime('%s', 'now', '-7 days') as int)
 	`
 	result, err := tx.Exec(query1)
 	if err != nil {

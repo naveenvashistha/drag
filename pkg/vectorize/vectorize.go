@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"drag/pkg/extractor"
 	"log"
 )
 
@@ -16,11 +17,14 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	log.Printf("Starting vector pipeline for: %s\n", filePath)
 
 	// 1. EXTRACTION & CHUNKING
-	textContent, err := ExtractText(filePath)
-	if err != nil || len(textContent) == 0 {
+	textContent, err := extractor.ExtractText(filePath)
+	if err != nil{
 		return err
 	}
-	chunks := ChunkText(textContent)
+	if len(textContent) == 0 {
+		return nil
+	}
+	chunks := extractor.ChunkText(textContent, 1500, 200, fileHash) // These parameters can be tweaked for different chunk sizes and overlaps
 
 	// 2. EMBEDDING
 	embeddings, err := EmbedChunks(chunks)
@@ -99,7 +103,7 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		// If 0 rows were affected, it means the 'WHERE files.status = pending' lock failed.
-		// The Watcher must have changed the status to 'missing' while we were doing the math!
+		// The Watcher must have changed the status to 'missing' while we were running the AI model!
 		// We return an error. The 'defer tx.Rollback()' at the top will automatically fire,
 		// deleting the orphan chunks and vectors we just inserted, keeping the DB perfectly clean.
 		log.Printf("Vectorization aborted: %s was altered by user during processing.", filepath.Base(filePath))
