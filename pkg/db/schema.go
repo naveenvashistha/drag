@@ -1,42 +1,44 @@
 package db
 
 import (
-	// Standard library packages for database/sql, file path manipulation, and logging
 	"database/sql"
-	"path/filepath"
 	"log"
-	// The database/sql driver wrapper for SQLite, which in turn uses the ncruces driver under the hood. This is necessary to register the "sqlite3" driver name with database/sql.
+	"path/filepath"
+
+	// Register the SQLite driver name used by database/sql.
 	_ "github.com/ncruces/go-sqlite3/driver"
-	// This package contains wasm bindings for sqlite-vec extension, which provides the vec0 virtual table for vector search. By importing it with a blank identifier
+	// Register sqlite-vec bindings so vec0 virtual tables are available.
 	_ "github.com/asg017/sqlite-vec-go-bindings/ncruces"
 )
 
-// InitDB creates or connects to the local SQLite file and runs the schema
-// function takes the data directory path as an argument, which is where the SQLite database file will be stored. and outputs pointer to the sql.DB connection pool and any error encountered during the process.
+// InitDB opens (or creates) the local SQLite database, validates connectivity,
+// configures connection-pool behavior, and applies the schema.
+//
+// The database file is stored in dataDir as drag.db. On success, the function
+// returns the shared sql.DB handle used by the rest of the application.
 func InitDB(dataDir string) (*sql.DB, error) {
 	dbPath := filepath.Join(dataDir, "drag.db")
+	// The DSN includes pragmas to set WAL mode (which lets you read concurrently alongside writing) for better concurrency, a busy timeout to reduce lock contention, and foreign key enforcement for data integrity.
+	// The sqlite3 driver parses these pragmas from the DSN and applies them when opening the connection.
 	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_fk=ON"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
 
-	// Test the connection
+	// Verify the database is reachable before continuing startup.
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
 
-	// 3. THE GO QUEUE MANAGER
-	// This forces all 4 of your background workers to share exactly 1 connection.
-	// When Worker A is writing, Workers B, C, and D are safely paused by Go 
-	// until the connection is free. No errors, no skipped files.
+	// Constrain writes to a single open connection to reduce lock contention and
+	// golang put the processes in sleep which are trying to access the locked database
 	db.SetMaxOpenConns(1)
-	
-	// (Optional but good practice) Keep the connection alive
+
+	// Keep one idle connection ready for reuse.
 	db.SetMaxIdleConns(1)
 
-	// Execute our schema
+	// Create/upgrade schema objects required by crawler and search pipelines.
 	if err := createTables(db); err != nil {
 		return nil, err
 	}
@@ -45,38 +47,37 @@ func InitDB(dataDir string) (*sql.DB, error) {
 	return db, nil
 }
 
-// createTables initializes the database schema, including tables for folders, files, chunks, and the necessary FTS5 and vec0 virtual tables for search functionality.
-// It also sets up triggers to keep the FTS and vector tables in sync with the main chunks table.
-// function takes a pointer to the sql.DB connection pool and returns any error encountered during the execution of the schema creation.
+// createTables defines the persistent schema for folder/file tracking, content
+// chunk storage, full-text search, vector search, and cleanup/indexing triggers.
+// It is safe to call repeatedly because all objects use IF NOT EXISTS guards.
 func createTables(db *sql.DB) error {
 	schema := `
-		-- 1. FOLDERS: The Watch Roots
+		-- Stores tracked folder paths and visibility/status metadata.
 	CREATE TABLE IF NOT EXISTS folders (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		path TEXT UNIQUE NOT NULL
+		id INTEGER PRIMARY KEY,
+		path TEXT UNIQUE NOT NULL,
 		status TEXT DEFAULT 'active',
-    	updated_at INTEGER DEFAULT (cast(strftime('%s', 'now') as int))
-		is_public INTEGER DEFAULT 0, -- 0 for private folders, 1 for public folders
+    	updated_at INTEGER DEFAULT (cast(strftime('%s', 'now') as int)),
+		is_public INTEGER DEFAULT 0 -- 0 = private, 1 = public
 	);
 
-	-- 2. DOCUMENTS: "The Brain" (Stores unique content states)
-	-- We use the xxHash as the Primary Key here.
+	-- Stores deduplicated content identities keyed by hash.
 	CREATE TABLE IF NOT EXISTS documents (
 		hash TEXT PRIMARY KEY,
 		created_at INTEGER DEFAULT (cast(strftime('%s', 'now') as int))
 	);
 
-	-- 3. FILES: "The Map" (Stores physical file locations)
+	-- Maps physical files to metadata and optional content hash ownership.
 	CREATE TABLE IF NOT EXISTS files (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id INTEGER PRIMARY KEY,
 		folder_path TEXT NOT NULL,
 		path TEXT UNIQUE NOT NULL,      
 		file_name TEXT NOT NULL,        
 		
-		-- AI LINK: Removed UNIQUE. Multiple files can now point to the same hash.
+		-- Not unique: multiple files can reference the same document hash.
 		file_hash TEXT,          
 		
-		-- HEURISTIC DATA: Added size for instant rename/move detection
+		-- Size + modified time support change/ghost detection heuristics.
 		size INTEGER NOT NULL,
 		last_modified INTEGER NOT NULL, 
 		
@@ -88,7 +89,7 @@ func createTables(db *sql.DB) error {
 		FOREIGN KEY (file_hash) REFERENCES documents(hash)
 	);
 
-	-- 4. CHUNKS: Now linked to the Document Hash, not the File ID
+	-- Stores extracted text chunks linked to a deduplicated document hash.
 	CREATE TABLE IF NOT EXISTS chunks (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		document_hash TEXT NOT NULL, 
@@ -97,41 +98,44 @@ func createTables(db *sql.DB) error {
 		FOREIGN KEY (document_hash) REFERENCES documents(hash) ON DELETE CASCADE
 	);
 
-	-- 5. FTS5 Index (Keyword Search) - Unchanged
+	-- Full-text keyword search index for chunk content.
 	CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5(
 		content,             
 		chunk_id UNINDEXED   
 	);
 
-	-- 6. vec0 Index (Semantic Search) - Unchanged
+	-- Vector index used for semantic similarity search.
 	CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
 		chunk_id INTEGER PRIMARY KEY,   
 		embedding float[384]            
 	);
 
-	-- 7. Triggers - Unchanged
+	-- Keep FTS rows synchronized with chunk inserts.
 	CREATE TRIGGER IF NOT EXISTS sync_fts_insert 
-	AFTER INSERT ON chunks 
+	AFTER INSERT ON chunks
 	BEGIN
-		INSERT INTO fts_chunks(chunk_id, content) VALUES (new.id, new.content);
+		INSERT INTO fts_chunks(content, chunk_id) VALUES (new.content, new.id);
 	END;
 
+	-- Remove FTS rows when chunk rows are deleted.
 	CREATE TRIGGER IF NOT EXISTS sync_fts_delete 
 	AFTER DELETE ON chunks 
 	BEGIN
 		DELETE FROM fts_chunks WHERE chunk_id = old.id;
 	END;
 
+	-- Remove vector rows when chunk rows are deleted.
 	CREATE TRIGGER IF NOT EXISTS cleanup_vec_chunks
 	AFTER DELETE ON chunks
 	BEGIN
 		DELETE FROM vec_chunks WHERE chunk_id = old.id;
 	END;
 
+	-- Delete orphaned documents after file-row deletion when no remaining file
+	-- references the same hash.
 	CREATE TRIGGER IF NOT EXISTS cleanup_orphan_documents
 	AFTER DELETE ON files
 	BEGIN
-		-- This deletes the document ONLY IF no other files are using this hash
 		DELETE FROM documents 
 		WHERE hash = OLD.file_hash 
 		AND NOT EXISTS (
@@ -139,10 +143,10 @@ func createTables(db *sql.DB) error {
 		);
 	END;
 
+	-- Delete old hash ownership on file-hash updates when it becomes orphaned.
 	CREATE TRIGGER IF NOT EXISTS cleanup_orphan_documents_update
     AFTER UPDATE ON files
     BEGIN
-        -- Deletes the old document ONLY IF no other files are still using it
         DELETE FROM documents 
         WHERE hash = OLD.file_hash 
         AND OLD.file_hash IS NOT NULL
@@ -150,6 +154,30 @@ func createTables(db *sql.DB) error {
             SELECT 1 FROM files WHERE file_hash = OLD.file_hash
         );
     END;
+
+	-- Supports retry and garbage-collection lookups by status/retry_count.
+	CREATE INDEX IF NOT EXISTS idx_files_status_retry 
+		ON files(status, retry_count);
+
+	-- Supports stale-row cleanup queries by status and updated_at.
+	CREATE INDEX IF NOT EXISTS idx_files_status_updated 
+		ON files(status, updated_at);
+
+	-- Supports ghost matching lookups by status + file metadata.
+	CREATE INDEX IF NOT EXISTS idx_files_ghost_lookup 
+		ON files(status, size, last_modified);
+
+	-- Supports orphan-document checks keyed by file_hash.
+	CREATE INDEX IF NOT EXISTS idx_files_hash 
+		ON files(file_hash);
+
+	-- Supports boot-time recovery scans by status + path + size + modified time.
+	CREATE INDEX IF NOT EXISTS idx_files_boot_sync
+    	ON files(status, path, size, last_modified);
+
+	-- Supports folder visibility queries and cascading status updates.
+	CREATE INDEX IF NOT EXISTS idx_folders_status
+   		ON folders(status, path);
 	`
 
 	_, err := db.Exec(schema)

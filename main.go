@@ -1,64 +1,97 @@
 package main
 
 import (
+	"drag/pkg/crawler"
 	"drag/pkg/db"
 	"drag/pkg/system"
 	"embed"
 	"log"
-	"drag/pkg/crawler"
+	"os"
+	"path/filepath"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
 
-// embed the frontend/dist directory into the binary itself. This allows us to serve the frontend assets directly from memory without needing to read from disk, which can simplify deployment and improve performance.
+// Embed the built frontend into the Go binary so the desktop app can serve its
+// UI directly from memory instead of depending on external files at runtime.
+// This makes distribution simpler, avoids missing-file issues, and keeps the
+// packaged application self-contained.
+//
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
 
-	// Enable autostart for the application
+	// Register the application for automatic startup so it can resume running
+	// in the background after the operating system starts.
 	system.EnableAutoStart()
 
-	// Initialize the database and get a connection pool. We can pass this db connection pool
-	db, db_err := db.InitDB("D:/Naveen/drag/drag/pkg/db")
+	// Locate the user-specific configuration directory, which is where the app
+	// stores its writable data on the current machine.
+	dataDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Fatal("Failed to get config dir:", err)
+	}
 
+	// Keep all Drag data inside a dedicated subfolder so app files stay grouped
+	// together and do not mix with other configuration data.
+	appDataDir := filepath.Join(dataDir, "Drag")
+	os.MkdirAll(appDataDir, 0755)
+
+	// Open the SQLite database and initialize the schema used by the crawler,
+	// vector search, retry logic, and cleanup jobs.
+	db, db_err := db.InitDB(appDataDir)
 	if db_err != nil {
 		log.Fatal("Failed to initialize database:", db_err)
 	}
-	defer db.Close() // Ensure the database connection is closed when the main function exits
 
+	// Create the filesystem watcher responsible for receiving live file events.
 	watcher, watchErr := crawler.NewFileWatcher(db)
 	if watchErr != nil {
 		log.Fatal("Failed to initialize folder watcher:", watchErr)
 	}
+	// Ensure the underlying fsnotify watcher is closed when the process exits.
 	defer watcher.Watcher.Close()
 
-	gc := crawler.GarbageCollector{DB: db}
-	
-	rm := crawler.RetryMachine{DB: db, ProcessQueue: watcher.ProcessQueue}
+	// GarbageCollector performs periodic cleanup of stale missing records.
+	gc := &crawler.GarbageCollector{DB: db}
 
-	walker := crawler.FileWalker{DB: db, Watch: watcher}
+	// RetryMachine periodically re-queues failed pending files.
+	rm := &crawler.RetryMachine{DB: db, ProcessQueue: watcher.ProcessQueue}
 
-	// Create an instance of the app structure
-	app := NewApp(db, watcher, &walker, &gc, &rm)
+	// FileWalker performs boot-time reconciliation between disk state and DB state.
+	walker := &crawler.FileWalker{DB: db, Watch: watcher}
 
-	// Create application with options
-	err := wails.Run(&options.App{
-		Title:  "drag", // The title of the application
-		Width:  1024, // The initial width of the application window
-		Height: 768, // The initial height of the application window
+	// Build the application controller that wires together the database,
+	// watcher, walker, retry machine, and garbage collector.
+	app := NewApp(db, watcher, walker, gc, rm)
 
-		// The AssetServer option tells Wails to serve the embedded frontend assets using the provided embed.FS. This allows us to load our React frontend directly from the binary without needing to read from disk.
+	// Launch the Wails desktop shell with the embedded frontend and the runtime
+	// options that control startup behavior and window presentation.
+	err = wails.Run(&options.App{
+		Title:  "drag",
+		Width:  1024,
+		Height: 768,
+
+		// Serve the embedded frontend bundle directly from the binary so the UI
+		// loads without needing a separate static file server.
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1}, // A nice dark blue background color for our app
-		StartHidden: true, // Start the app hidden since we want it to run in the system tray and only show the window when the user clicks "Open Drag" from the tray menu
-		OnStartup: app.startup, // The startup function will be called when the app starts, 
-		HideWindowOnClose: true, // When the user clicks the close button on the window, we want to hide it instead of quitting the app, since we want it to keep running in the system tray. The user can quit the app from the tray menu.
-		// Bind the app struct to the Wails runtime, which allows us to call methods on our App struct from the frontend (like showing/hiding the window when the user clicks tray menu items). We can add more structs to this Bind array later as we build out more functionality and want to expose more methods to the frontend.
-		Bind: []interface{}{ 
+		// Use a dark background so the desktop shell starts with a consistent
+		// appearance even before the frontend finishes rendering.
+		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		// Start the app hidden because Drag is intended to live in the tray and
+		// be shown only when the user explicitly opens it.
+		StartHidden: true,
+		// Run application startup initialization after the shell is ready.
+		OnStartup: app.startup,
+		// Hide the window instead of terminating so background services remain
+		// available until the user quits from the tray menu.
+		HideWindowOnClose: true,
+		// Expose structs and methods to the frontend so the UI can call into Go code.
+		Bind: []interface{}{
 			app,
 		},
 	})
