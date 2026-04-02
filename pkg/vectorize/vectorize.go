@@ -2,54 +2,70 @@ package vectorize
 
 import (
 	"database/sql"
-	"os"
-	"path/filepath"
 	"drag/pkg/extractor"
 	"log"
+	"os"
+	"path/filepath"
 )
 
 type Vectorizer struct {
 	DB *sql.DB
 }
 
-// Vectorize runs a file through the pipeline and saves it atomically using the Hash PK.
+// Vectorize processes one file end-to-end: it extracts readable text, breaks that
+// text into overlapping chunks, generates an embedding for each chunk, and then
+// stores everything inside one database transaction so the file is either fully
+// indexed or not indexed at all.
 func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash string, info os.FileInfo) error {
 	log.Printf("Starting vector pipeline for: %s\n", filePath)
 
-	// 1. EXTRACTION & CHUNKING
+	// Step 1: extract the file contents and split them into search-friendly pieces.
+	// The extractor is responsible for turning the file into plain text, and the
+	// chunker breaks that text into smaller windows so embeddings stay within the
+	// model's practical input limits while still preserving nearby context.
 	textContent, err := extractor.ExtractText(filePath)
-	if err != nil{
+	if err != nil {
 		return err
 	}
 	if len(textContent) == 0 {
 		return nil
 	}
-	chunks := extractor.ChunkText(textContent, 1500, 200, fileHash) // These parameters can be tweaked for different chunk sizes and overlaps
+	// The chunk size controls how much text is placed into each embedding request.
+	// The overlap keeps a small amount of repeated context between neighboring
+	// chunks so important sentences that cross a boundary are still discoverable.
+	chunks := extractor.ChunkText(textContent, 800, 100, fileHash)
 
-	// 2. EMBEDDING
+	// Step 2: convert each chunk into a vector embedding that can later be used
+	// for similarity search. The embedding order must match the chunk order so each
+	// stored vector still points to the correct chunk of source text.
 	embeddings, err := EmbedChunks(chunks)
 	if err != nil {
 		return err
 	}
 
-	// ==========================================
-	// 3. ATOMIC DATABASE TRANSACTION
-	// ==========================================
+	// Step 3: open a transaction so every database write for this file happens as
+	// one atomic unit. If anything fails after this point, the deferred rollback
+	// removes all partially written rows and keeps the database consistent.
 	tx, err := v.DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// A. Insert the master document hash (IGNORE if it already exists)
+	// Record the document hash first. This acts as the stable identity for the
+	// source file, and INSERT OR IGNORE avoids duplicate rows when the same file is
+	// encountered again.
 	_, err = tx.Exec(`INSERT OR IGNORE INTO documents (hash) VALUES (?)`, fileHash)
 	if err != nil {
 		log.Println("Failed to insert document hash:", err)
 		return err
 	}
 
-	// B. Prepare Statements for massive speed boost
-	// We need RETURNING id on chunks to feed the sqlite-vec table
+	// Prepare the chunk and vector insert statements once so the database can reuse
+	// the parsed SQL for every row. This is much faster than rebuilding the query
+	// on each loop iteration, especially for documents with many chunks.
+	// The chunks table returns the generated chunk id because the vector table stores
+	// embeddings against that id rather than duplicating the text again.
 	chunkStmt, err := tx.Prepare(`
 		INSERT INTO chunks (document_hash, chunk_index, content) 
 		VALUES (?, ?, ?) RETURNING id`)
@@ -66,18 +82,21 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	}
 	defer vecStmt.Close()
 
-	// C. Insert every chunk and its vector
+	// Insert each chunk and its embedding pair-by-pair. This keeps the database
+	// relationships explicit: one row stores the chunk text, and a second row stores
+	// the numeric vector that represents that chunk for similarity search.
 	for i, chunk := range chunks {
 		var chunkID int
-		
-		// Insert Text Chunk
+
 		err = chunkStmt.QueryRow(fileHash, i, chunk).Scan(&chunkID)
 		if err != nil {
 			log.Printf("Failed to insert chunk text %d: %v\n", i, err)
-			return err 
+			return err
 		}
 
-		// Insert Vector Embedding (Make sure embeddings[i] is formatted for sqlite-vec)
+		// Store the embedding using the chunk id produced above. The vector value
+		// must already be in the format expected by the vector extension, so the
+		// embedding generator and the database schema need to agree on representation.
 		_, err = vecStmt.Exec(chunkID, embeddings[i])
 		if err != nil {
 			log.Printf("Failed to insert vector %d: %v\n", i, err)
@@ -85,7 +104,11 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 		}
 	}
 
-	// C. UPSERT The File Map (Now 100% Atomic with the Vectors)
+	// Upsert the file record itself so the crawler can track where the file lives,
+	// how large it is, when it was last modified, and whether it is currently active.
+	// The conflict rule lets an existing pending row be refreshed, while preventing
+	// accidental overwrites when another part of the system has already marked it
+	// as handled or missing.
 	result, dbErr := tx.Exec(`
 		INSERT INTO files (folder_path, path, file_name, file_hash, size, last_modified, status) 
 		VALUES (?, ?, ?, ?, ?, ?, 'active')
@@ -93,24 +116,27 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 			file_hash = excluded.file_hash, size = excluded.size,
 			last_modified = excluded.last_modified, status = 'active',
 			updated_at = cast(strftime('%s', 'now') as int)
-			WHERE files.status = 'pending'`, 
+			WHERE files.status = 'pending'`,
 		folderPath, filePath, filepath.Base(filePath), fileHash, info.Size(), info.ModTime().Unix())
 
 	if dbErr != nil {
-		return dbErr // defer tx.Rollback() handles the cleanup
+		// The deferred rollback will undo every insert in this transaction, so a
+		// single failure does not leave behind orphan chunks or vector rows.
+		return dbErr
 	}
 
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		// If 0 rows were affected, it means the 'WHERE files.status = pending' lock failed.
-		// The Watcher must have changed the status to 'missing' while we were running the AI model!
-		// We return an error. The 'defer tx.Rollback()' at the top will automatically fire,
-		// deleting the orphan chunks and vectors we just inserted, keeping the DB perfectly clean.
+		// A zero-row update means the file record no longer matched the expected
+		// pending state, usually because another watcher changed the status while
+		// this file was being processed. In that case we abort and let rollback
+		// remove the chunk and vector rows we inserted moments earlier.
 		log.Printf("Vectorization aborted: %s was altered by user during processing.", filepath.Base(filePath))
 		return nil
 	}
 
-	// D. Commit to the hard drive
+	// Once every insert succeeds, commit the transaction so the database writes
+	// become visible together. Until this point, nothing is permanent.
 	if err := tx.Commit(); err != nil {
 		return err
 	}
