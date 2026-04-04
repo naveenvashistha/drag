@@ -6,9 +6,11 @@ import (
 	"drag/pkg/crawler"
 	_ "embed"
 	"os"
+    "fmt"
 	"path/filepath"
 	"github.com/getlantern/systray"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+    "runtime"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // Embed the tray icon into the binary so the application can configure the
@@ -65,12 +67,15 @@ func (a *App) startup(ctx context.Context) {
 
 	// Launch the tray loop asynchronously so its event pump does not block the
 	// rest of application startup.
-	go systray.Run(a.OnReady, a.OnExit)
-
+    go func() {
+        runtime.LockOSThread() // systray requires the same thread for working and breaks if go scheduler moves it to a different one, so we lock the goroutine to its current OS thread.
+	    systray.Run(a.OnReady, a.OnExit)
+    }()
+    
 	a.Watcher.SetContext(ctx)
 
     // Run the boot-time file walker to reconcile the database with the current
-	go a.Walker.RunBootSync()
+	//go a.Walker.RunBootSync()
     // Start the live filesystem watcher so the crawler can respond to changes.
 	go a.Watcher.StartWatching()
     // Start the garbage collector and retry sweeper so they can perform periodic maintenance in the background.
@@ -103,12 +108,12 @@ func (a *App) OnReady() {
 			select {
 			case <-mOpen.ClickedCh:
 				// Show the main window when the user asks to open the app.
-				runtime.WindowShow(a.ctx)
+				wailsRuntime.WindowShow(a.ctx)
 
 			case <-mQuit.ClickedCh:
 				// Shut down the tray subsystem first, then ask Wails to exit.
 				systray.Quit()
-				runtime.Quit(a.ctx)
+				wailsRuntime.Quit(a.ctx)
 			}
 		}
 	}()
@@ -316,4 +321,8 @@ func (a *App) GetFileInfo(filePath string) (FileDisplayInfo, error) {
 func (a *App) OnExit() {
 	// Close the shared database handle so the connection pool is released cleanly.
 	a.DB.Close()
+}
+
+func (a *App) Greet(name string) string {
+	return fmt.Sprintf("Hello %s, It's show time!", name)
 }
