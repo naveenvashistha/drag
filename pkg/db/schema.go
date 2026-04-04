@@ -4,11 +4,8 @@ import (
 	"database/sql"
 	"log"
 	"path/filepath"
-
-	// Register the SQLite driver name used by database/sql.
-	_ "github.com/ncruces/go-sqlite3/driver"
-	// Register sqlite-vec bindings so vec0 virtual tables are available.
-	_ "github.com/asg017/sqlite-vec-go-bindings/ncruces"
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // InitDB opens (or creates) the local SQLite database, validates connectivity,
@@ -17,10 +14,11 @@ import (
 // The database file is stored in dataDir as drag.db. On success, the function
 // returns the shared sql.DB handle used by the rest of the application.
 func InitDB(dataDir string) (*sql.DB, error) {
+	sqlite_vec.Auto()
 	dbPath := filepath.Join(dataDir, "drag.db")
 	// The DSN includes pragmas to set WAL mode (which lets you read concurrently alongside writing) for better concurrency, a busy timeout to reduce lock contention, and foreign key enforcement for data integrity.
 	// The sqlite3 driver parses these pragmas from the DSN and applies them when opening the connection.
-	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_fk=ON"
+	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err

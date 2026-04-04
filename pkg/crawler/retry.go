@@ -38,11 +38,13 @@ func (rm *RetryMachine) runRetry() {
 	// A file is considered retryable here only when it is still marked pending
 	// and has a retry count between 1 and 2, which means the system has already
 	// tried it before but has not yet exhausted the maximum retry budget.
+	log.Println("Retry Sweeper: Scanning for pending files eligible for retry...")
 	rows, err := rm.DB.Query(`
 		SELECT path FROM files 
 		WHERE status = 'pending' AND retry_count > 0 AND retry_count < 3
 	`)
 	if err != nil {
+		log.Println("Retry Sweeper: Error querying pending files.")
 		return
 	}
 	defer rows.Close()
@@ -71,4 +73,5 @@ func (rm *RetryMachine) runRetry() {
 		// Emit a summary when at least one file was discovered and re-queued.
 		log.Printf("Retry Sweeper: Queued %d pending files for another attempt.\n", count)
 	}
+	log.Println("Retry Sweeper: Completed one pass through pending files.")
 }
