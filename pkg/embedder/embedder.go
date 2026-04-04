@@ -1,7 +1,7 @@
 package embedder
 
 import (
-	
+	"drag/pkg/extractor"
 )
 
 type Embedder struct {
@@ -12,7 +12,7 @@ func NewEmbedder(model string) *Embedder {
 	return &Embedder{model: model}
 }
 
-func (e *Embedder) Embed(text string) ([]float32, error) {
+func Embed(chunks []extractor.Chunk) ([]float32, error) {
 	// TODO: Implement embedding logic
 	return nil, nil
 }
