@@ -14,7 +14,6 @@ import (
 
 
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"drag/pkg/embedder"
