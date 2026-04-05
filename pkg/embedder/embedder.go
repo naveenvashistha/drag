@@ -42,14 +42,14 @@ func NewEmbedder() *Embedder {
 		embedding: list of 384 length, on successful embedding
 		error: if there were any errors caused
 */
-func (o *Embedder) Embed(text extractor.Chunk) ([]float32, error) {
-	if text.Content == "" {
+func (o *Embedder) EmbedText(text string) ([]float32, error) {
+	if text == "" {
 		return nil, ErrEmptyText
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{
 		"model":  o.Model,
-		"prompt": text.Content,
+		"prompt": text,
 	})
 
 	resp, err := http.Post(o.URL, "application/json", bytes.NewBuffer(reqBody))
@@ -82,11 +82,11 @@ func (o *Embedder) Embed(text extractor.Chunk) ([]float32, error) {
 		embedding[]: a list of vectors each of 384 length, on successful embedding
 		error: if there were any errors caused
 */
-func (o *Embedder) EmbedBatch(texts []extractor.Chunk) ([][]float32, error) {
+func (o *Embedder) Embed(texts []extractor.Chunk) ([][]float32, error) {
 	var batch [][]float32
 
 	for _, t := range texts {
-		vec, err := o.Embed(t)
+		vec, err := o.EmbedText(t.Content)
 		if err != nil {
 			return nil, err
 		}
