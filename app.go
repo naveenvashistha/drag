@@ -8,6 +8,9 @@ import (
 	"os"
     "fmt"
 	"path/filepath"
+	"os"
+    "fmt"
+	"path/filepath"
 	"github.com/getlantern/systray"
     "runtime"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -37,6 +40,14 @@ type FileDisplayInfo struct {
 // App holds the shared application services and runtime context used across the
 // entire lifecycle of the desktop process.
 type App struct {
+	// ctx is the Wails application context, which lets the app call runtime
+	// functions such as show, hide, or quit from any method on App.
+	ctx     context.Context
+	DB      *sql.DB
+	Watcher *crawler.FileWatcher
+	Walker  *crawler.FileWalker
+	GC      *crawler.GarbageCollector
+	RM      *crawler.RetryMachine
 	// ctx is the Wails application context, which lets the app call runtime
 	// functions such as show, hide, or quit from any method on App.
 	ctx     context.Context
@@ -81,7 +92,24 @@ func (a *App) startup(ctx context.Context) {
     // Start the garbage collector and retry sweeper so they can perform periodic maintenance in the background.
 	go a.GC.StartGarbageCollection()
 	go a.RM.StartRetrySweeper()
+	// Launch the tray loop asynchronously so its event pump does not block the
+	// rest of application startup.
+    go func() {
+        runtime.LockOSThread() // systray requires the same thread for working and breaks if go scheduler moves it to a different one, so we lock the goroutine to its current OS thread.
+	    systray.Run(a.OnReady, a.OnExit)
+    }()
+    
+	a.Watcher.SetContext(ctx)
+
+    // Run the boot-time file walker to reconcile the database with the current
+	//go a.Walker.RunBootSync()
+    // Start the live filesystem watcher so the crawler can respond to changes.
+	go a.Watcher.StartWatching()
+    // Start the garbage collector and retry sweeper so they can perform periodic maintenance in the background.
+	go a.GC.StartGarbageCollection()
+	go a.RM.StartRetrySweeper()
 }
+
 
 // OnReady is called after the tray subsystem is ready, which is when the icon,
 // tooltip, and interactive menu items can safely be created.
