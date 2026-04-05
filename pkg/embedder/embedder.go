@@ -2,22 +2,6 @@ package embedder
 
 import (
 	"drag/pkg/extractor"
-)
-
-type Embedder struct {
-	model string
-}
-
-func NewEmbedder(model string) *Embedder {
-	return &Embedder{model: model}
-}
-
-func Embed(chunks []extractor.Chunk) ([]float32, error) {
-	// TODO: Implement embedding logic
-	return nil, nil
-}package main
-
-import (
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -35,14 +19,14 @@ var ErrEmptyText = errors.New("Cannot embed empty text")
 */
 
 // type of the embedder instance
-type OllamaEmbedder struct {
+type Embedder struct {
 	URL   string
 	Model string
 }
 
 // function creates an instance of embeder
-func NewOllamaEmbedder() *OllamaEmbedder {
-	return &OllamaEmbedder{
+func NewEmbedder() *Embedder {
+	return &Embedder{
 		URL:   "http://localhost:11434/api/embeddings",
 		Model: "all-minilm", 
 	}
@@ -58,14 +42,14 @@ func NewOllamaEmbedder() *OllamaEmbedder {
 		embedding: list of 384 length, on successful embedding
 		error: if there were any errors caused
 */
-func (o *OllamaEmbedder) Embed(text string) ([]float32, error) {
-	if text == "" {
+func (o *Embedder) Embed(text extractor.Chunk) ([]float32, error) {
+	if text.Content == "" {
 		return nil, ErrEmptyText
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{
 		"model":  o.Model,
-		"prompt": text,
+		"prompt": text.Content,
 	})
 
 	resp, err := http.Post(o.URL, "application/json", bytes.NewBuffer(reqBody))
@@ -98,7 +82,7 @@ func (o *OllamaEmbedder) Embed(text string) ([]float32, error) {
 		embedding[]: a list of vectors each of 384 length, on successful embedding
 		error: if there were any errors caused
 */
-func (o *OllamaEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
+func (o *Embedder) EmbedBatch(texts []extractor.Chunk) ([][]float32, error) {
 	var batch [][]float32
 
 	for _, t := range texts {
