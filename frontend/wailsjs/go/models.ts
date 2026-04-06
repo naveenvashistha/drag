@@ -41,3 +41,22 @@ export namespace main {
 
 }
 
+export namespace search {
+	
+	export class LocalSearchResult {
+	    filePath: string;
+	    fileName: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LocalSearchResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.filePath = source["filePath"];
+	        this.fileName = source["fileName"];
+	    }
+	}
+
+}
+

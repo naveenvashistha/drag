@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"drag/pkg/crawler"
+	"drag/pkg/search"
 	_ "embed"
 	"os"
-    "fmt"
 	"path/filepath"
 	"os"
     "fmt"
@@ -48,25 +48,19 @@ type App struct {
 	Walker  *crawler.FileWalker
 	GC      *crawler.GarbageCollector
 	RM      *crawler.RetryMachine
-	// ctx is the Wails application context, which lets the app call runtime
-	// functions such as show, hide, or quit from any method on App.
-	ctx     context.Context
-	DB      *sql.DB
-	Watcher *crawler.FileWatcher
-	Walker  *crawler.FileWalker
-	GC      *crawler.GarbageCollector
-	RM      *crawler.RetryMachine
+	Searcher *search.Searcher
 }
 
 // NewApp constructs the main application container and wires in the shared
 // dependencies used by the UI, watcher, walker, retry machine, and cleanup jobs.
-func NewApp(db *sql.DB, watcher *crawler.FileWatcher, walker *crawler.FileWalker, gc *crawler.GarbageCollector, rm *crawler.RetryMachine) *App {
+func NewApp(db *sql.DB, watcher *crawler.FileWatcher, walker *crawler.FileWalker, gc *crawler.GarbageCollector, rm *crawler.RetryMachine, searcher *search.Searcher) *App {
 	return &App{
 		DB:      db,
 		Watcher: watcher,
 		Walker:  walker,
 		GC:      gc,
 		RM:      rm,
+		Searcher: searcher,
 	}
 }
 
@@ -344,13 +338,26 @@ func (a *App) GetFileInfo(filePath string) (FileDisplayInfo, error) {
 	return f, nil
 }
 
+func (a *App) Search(query string, useHybrid bool) ([]search.LocalSearchResult, error) {
+	var results []search.SearchResult
+	var err error
+
+	if useHybrid {
+		results, err = a.Searcher.HybridSearch(a.ctx, query)
+	} else {
+		results, err = a.Searcher.SearchSemantic(a.ctx, query)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return a.Searcher.SearchLocal(results), nil
+}
+
 // OnExit performs final process shutdown cleanup when the application is about
 // to terminate.
 func (a *App) OnExit() {
 	// Close the shared database handle so the connection pool is released cleanly.
 	a.DB.Close()
-}
-
-func (a *App) Greet(name string) string {
-	return fmt.Sprintf("Hello %s, It's show time!", name)
 }
