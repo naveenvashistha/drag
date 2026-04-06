@@ -8,9 +8,6 @@ import (
 	"os"
     "fmt"
 	"path/filepath"
-	"os"
-    "fmt"
-	"path/filepath"
 	"github.com/getlantern/systray"
     "runtime"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -40,14 +37,6 @@ type FileDisplayInfo struct {
 // App holds the shared application services and runtime context used across the
 // entire lifecycle of the desktop process.
 type App struct {
-	// ctx is the Wails application context, which lets the app call runtime
-	// functions such as show, hide, or quit from any method on App.
-	ctx     context.Context
-	DB      *sql.DB
-	Watcher *crawler.FileWatcher
-	Walker  *crawler.FileWalker
-	GC      *crawler.GarbageCollector
-	RM      *crawler.RetryMachine
 	// ctx is the Wails application context, which lets the app call runtime
 	// functions such as show, hide, or quit from any method on App.
 	ctx     context.Context
