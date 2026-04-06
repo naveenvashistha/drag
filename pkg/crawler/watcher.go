@@ -322,7 +322,7 @@ func (w *FileWatcher) processFileFast(newPath string) {
 	folderPath := filepath.Dir(newPath)
 
 	// Hash current bytes to identify content-level equality independent of path.
-	actualHash, hErr := hasher.CalculateHash(newPath)
+	actualHash, hErr := hasher.HashFile(newPath)
 	if hErr != nil {
 		log.Printf("Failed to calculate hash for %s: %v\n", newPath, hErr)
 		return

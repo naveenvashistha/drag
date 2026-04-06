@@ -10,16 +10,16 @@ export function GetFileInfo(arg1) {
   return window['go']['main']['App']['GetFileInfo'](arg1);
 }
 
-export function Greet(arg1) {
-  return window['go']['main']['App']['Greet'](arg1);
-}
-
 export function OnExit() {
   return window['go']['main']['App']['OnExit']();
 }
 
 export function OnReady() {
   return window['go']['main']['App']['OnReady']();
+}
+
+export function Search(arg1, arg2) {
+  return window['go']['main']['App']['Search'](arg1, arg2);
 }
 
 export function SetFolderVisibility(arg1, arg2, arg3) {
