@@ -4,6 +4,8 @@ import (
 	"drag/pkg/crawler"
 	"drag/pkg/db"
 	"drag/pkg/system"
+	"drag/pkg/search"
+	"drag/pkg/embedder"
 	"embed"
 	"log"
 	"os"
@@ -63,9 +65,13 @@ func main() {
 	// FileWalker performs boot-time reconciliation between disk state and DB state.
 	walker := &crawler.FileWalker{DB: db, Watch: watcher}
 
+	// Initialize the embedder and searcher
+	emb := embedder.NewEmbedder()  // however you initialize yours
+	searcher := search.NewSearcher(db, emb)
+
 	// Build the application controller that wires together the database,
 	// watcher, walker, retry machine, and garbage collector.
-	app := NewApp(db, watcher, walker, gc, rm)
+	app := NewApp(db, watcher, walker, gc, rm, searcher)
 
 	// Launch the Wails desktop shell with the embedded frontend and the runtime
 	// options that control startup behavior and window presentation.

@@ -1,25 +1,12 @@
 package hasher
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	
 	"io"
 	"os"
-
+	"fmt"
 	// xxhash library, reference: https://pkg.go.dev/github.com/cespare/xxhash
 	"github.com/cespare/xxhash/v2"
 )
-
-// CalculateHash generates a SHA256 hash of the input string
-func CalculateHash(input string) (string, error) {
-	hash := sha256.Sum256([]byte(input))
-	return hashToString(hash), nil
-}
-
-func hashToString(hash [32]byte) string {
-	return hex.EncodeToString(hash[:])
-}
 
 /*
 	params:
@@ -29,10 +16,10 @@ func hashToString(hash [32]byte) string {
 		a numeric hash of type uint64
 		ex: 6925293637973706096
 */
-func hashFile(filePath string) (uint64, error) {
+func HashFile(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	defer file.Close()
 
@@ -41,9 +28,9 @@ func hashFile(filePath string) (uint64, error) {
 
 	// Copy function copies the file from the source to destination (which is hasher here)
 	if _, err := io.Copy(hasher, file); err != nil {
-		return 0, err
+		return "", err
 	}
 
-	// Sum64() returns the numeric hash directly
-	return hasher.Sum64(), nil
+	// Sum64() returns the numeric hash directly but we convert it to a hex string for better readability and storage efficiency in the database.
+	return fmt.Sprintf("%016x", hasher.Sum64()), nil
 }
