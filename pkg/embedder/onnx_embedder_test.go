@@ -1,6 +1,16 @@
+/**
+	Command to test: go test -v ./pkg/embedder
+
+	Before testing change the type of the parameter in the onnx_embedder.go function
+	from 
+		func (o *ONNXEmbedder) Embed(texts []extractor.Chunk)
+	to
+		func (o *ONNXEmbedder) Embed(texts []string)
+*/
+
 package embedder
 
-import (
+import 
 	"fmt"
 	"testing"
 )

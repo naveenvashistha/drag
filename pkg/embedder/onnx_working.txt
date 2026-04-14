@@ -1,0 +1,92 @@
+HOW ONNX MODELS ARE EMBEDDED INTO THE APPLICATION
+
+=============================================================================
+Stage 1: Build Time
+
+//go:embed models/model.onnx
+var modelBytes []byte
+
+//go:embed models/tokenizer.json
+var tokenizerBytes []byte
+
+When you run `go build` or `wails build`, the compiler hits these lines.
+It takes the physical 'model.onnx' file and 'tokenizer.json' and hardcodes it directly into the binary of your .exe. 
+At this stage, there is no file anymore, it is just a massive array of bytes permanently fused into your application.
+
+
+=============================================================================
+Stage 2: Initialization (NewONNXEmbedder)
+
+When your Wails app boots up and you call this function, you are "waking up" the C++ engine.
+
+Locating the Engine: `SetSharedLibraryPath` tells Go where to find the C++ math engine (onnxruntime.dll).
+
+Booting the Environment: `InitializeEnvironment()` actually loads the DLL into your app's live memory space.
+
+The Extraction Hack: Because the ONNX C++ engine expects a physical file path to load a model (it can't easily read Go's internal variables), 
+you write the modelBytes from RAM out to your hard drive as a temporary file (tmpModel.Name()).
+
+Loading the Math: `NewDynamicAdvancedSession` tells the C++ engine to read that temporary file and load all the neural network 
+weights into Unmanaged C-Memory.
+
+
+=============================================================================
+Stage 3: The Inference Loop (Embed)
+This is what happens every single time a user searches for a query or a file is ingested.
+
+Tokenization (Go Memory): Your Go code takes the string "budget" and converts it into integers like [101, 4321, 102]. This happens entirely in normal Go memory.
+
+[Mode about this later on]
+Tensor Allocation (Crossing the Border): The C++ engine cannot read Go slices directly. When you call ort.NewTensor(...), you are allocating a highly specific block of memory that both Go and C++ are allowed to look at.
+
+The Execution: You call session.Run(...). Go pauses and hands control over to the C++ engine. The C++ engine looks at the Tensor memory, runs millions of matrix multiplications using the neural network weights, and writes the output (a massive array of floats) into the outputTensor memory block.
+
+Data Extraction: outputTensor.GetData() pulls the raw numbers out of the shared memory and back into standard Go slices.
+
+
+=============================================================================
+Stage 4: Post-Processing & Memory Management
+Once the C++ engine is done, control is handed back to Go.
+
+Mean Pooling & Normalization: The engine gives you a 384-dimension vector for every single word. Your meanPooling function averages them together so the whole sentence is represented by one vector. normalize scales the numbers so the math works perfectly for cosine similarity later.
+
+The Cleanup (Crucial): Notice all the defer tensorIDs.Destroy() calls? Because these Tensors live on the C++ side of the border, Go's Garbage Collector cannot see them. If you don't call .Destroy(), your app will leak memory every time someone searches, eventually crashing the user's computer.
+
+
+=============================================================================
+
+HOW C++ engine and GO communicate
+Here is the exact anatomy of how data crosses the border between Go and the C++ ONNX engine:
+
+1. "Go Land" (Safe, Managed Memory)
+When you write inputIDs := make([]int64, seqLen), Go allocates this array in its own managed memory. Go's Garbage Collector (GC) watches this array. If you stop using it, the GC automatically cleans it up.
+
+The Problem: The Microsoft C++ engine has absolutely no idea this memory exists. If you handed the engine a Go pointer, Go's GC might move or delete the array while C++ is trying to do math on it, instantly crashing your app with a "Segmentation Fault."
+
+2. The Bridge (ort.NewTensor)
+This is the function that crosses the border. When you call ort.NewTensor(shape, inputIDs), the library does something very specific:
+
+It reaches into the C++ side and says, "Hey, allocate a block of raw, unmanaged memory big enough to hold these numbers." (This is the "special memory space").
+
+It copies the numbers from your safe Go array into this raw C-memory block.
+
+It hands Go back a pointer to that C-memory block (wrapped in the Tensor struct).
+
+3. "C++ Land" (Raw, Unmanaged Memory)
+Now you call session.Run().
+The ONNX engine does exactly what you described:
+
+It looks at the Input Pointers (the C-memory block containing your token IDs).
+
+It runs its matrix multiplication.
+
+It writes the 384-dimensional floating-point results directly into the Output Pointer (the empty C-memory block you created with NewEmptyTensor).
+
+It does not talk to Go. It does not know Go exists. It just reads C-memory and writes to C-memory.
+
+4. Coming Home (GetData and Destroy)
+When the run is finished, Go regains control.
+
+The Read: You call outputTensor.GetData(). This reaches across the border, reads the numbers out of the C-memory, and copies them back into a safe, normal Go []float32 slice so your program can actually use them.
+
+The Cleanup: You must call defer tensor.Destroy(). Because this memory belongs to C++, Go's Garbage Collector will never clean it up. Calling Destroy() is the equivalent of yelling across the border, "Hey C++, I copied my data out, you can free() that memory block now!"

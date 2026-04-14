@@ -66,7 +66,7 @@ func main() {
 	walker := &crawler.FileWalker{DB: db, Watch: watcher}
 
 	// Initialize the embedder and searcher
-	emb := embedder.NewEmbedder()  // however you initialize yours
+	emb, err := embedder.NewEmbedder()  // however you initialize yours
 	searcher := search.NewSearcher(db, emb)
 
 	// Build the application controller that wires together the database,

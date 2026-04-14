@@ -11,7 +11,9 @@ require (
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mattn/go-sqlite3 v1.14.40
 	github.com/shirou/gopsutil/v3 v3.24.5
+	github.com/sugarme/tokenizer v0.3.0
 	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/yalue/onnxruntime_go v1.27.0
 	golang.org/x/sys v0.41.0
 )
 
@@ -49,13 +51,11 @@ require (
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
-	github.com/sugarme/tokenizer v0.3.0 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	github.com/yalue/onnxruntime_go v1.27.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.49.0 // indirect

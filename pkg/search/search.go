@@ -20,7 +20,7 @@ type SearchResult struct {
 
 type Searcher struct {
 	DB  *sql.DB
-	Emb *embedder.Embedder
+	Emb embedder.Embedder
 }
 
 type LocalSearchResult struct {
@@ -28,7 +28,7 @@ type LocalSearchResult struct {
     FileName      string  `json:"fileName"`
 }
 
-func NewSearcher(db *sql.DB, emb *embedder.Embedder) *Searcher {
+func NewSearcher(db *sql.DB, emb embedder.Embedder) *Searcher {
 	return &Searcher{
 		DB:  db,
 		Emb: emb,

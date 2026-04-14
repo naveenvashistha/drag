@@ -39,7 +39,7 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	// Step 2: convert each chunk into a vector embedding that can later be used
 	// for similarity search. The embedding order must match the chunk order so each
 	// stored vector still points to the correct chunk of source text.
-	embed := embedder.NewEmbedder()
+	embed, err := embedder.NewEmbedder()
 	embeddings, err := embed.Embed(chunks)
 	
 	if err != nil {
