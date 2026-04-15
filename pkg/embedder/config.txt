@@ -3,7 +3,5 @@ Visit https://huggingface.co/Xenova/all-MiniLM-L6-v2/tree/main
 Download 
 - onnx/model.onnx
 - tokenizer.json
-- config.json
-- tokenizer_config.json
 
 Place all the files here under models/ directory
