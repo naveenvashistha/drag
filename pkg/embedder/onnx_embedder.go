@@ -28,8 +28,15 @@ type ONNXEmbedder struct {
 func NewONNXEmbedder() (*ONNXEmbedder, error) {
 	// The onnxruntime.dll file should be placed in the root directory of the project
 	// This looks for the DLL in the directory where the app was started.
-	dllPath := filepath.Join("..", "..", "onnxruntime.dll")
+	dllPath := filepath.Join("D:\\Naveen\\drag\\drag", "onnxruntime.dll")
 	ort.SetSharedLibraryPath(dllPath)
+// 	execPath, err := os.Executable()
+// if err != nil {
+//     return nil, fmt.Errorf("failed to get executable path: %w", err)
+// }
+// 	execDir := filepath.Dir(execPath)
+// 	dllPath := filepath.Join(execDir, "onnxruntime.dll")
+// 	ort.SetSharedLibraryPath(dllPath)
 	
 	if err := ort.InitializeEnvironment(); err != nil {
 		return nil, fmt.Errorf("failed to init onnx environment: %w", err)

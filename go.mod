@@ -12,13 +12,12 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.40
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/sugarme/tokenizer v0.3.0
-	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/wailsapp/wails/v2 v2.11.0
 	github.com/yalue/onnxruntime_go v1.27.0
 	golang.org/x/sys v0.41.0
 )
 
 require (
-	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/getlantern/context v0.0.0-20190109183933-c447772a6520 // indirect
