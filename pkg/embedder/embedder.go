@@ -2,8 +2,6 @@ package embedder
 
 import (
 	"drag/pkg/extractor"
-	"fmt"
-	"os"
 )
 
 type Embedder interface {
@@ -13,17 +11,5 @@ type Embedder interface {
 }
 
 func NewEmbedder() (Embedder, error) {
-	mode := os.Getenv("EMBEDDER_MODE")
-	if mode == "" {
-		mode = "ollama" // default to ollama in dev
-	}
-
-	switch mode {
-		case "ollama":
-			return NewOllamaEmbedder(), nil
-		case "onnx":
-			return NewONNXEmbedder()
-		default:
-			return nil, fmt.Errorf("unknown embedder mode: %s", mode)
-	}
+	return NewONNXEmbedder()
 }
