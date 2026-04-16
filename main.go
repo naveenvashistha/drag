@@ -48,8 +48,14 @@ func main() {
 		log.Fatal("Failed to initialize database:", db_err)
 	}
 
+	// Initialize the embedder and searcher
+	emb, err := embedder.NewONNXEmbedder()  // however you initialize yours
+	if err != nil {
+		log.Fatal("Failed to initialize embedder:", err)
+	}
+
 	// Create the filesystem watcher responsible for receiving live file events.
-	watcher, watchErr := crawler.NewFileWatcher(db)
+	watcher, watchErr := crawler.NewFileWatcher(db, emb)
 	if watchErr != nil {
 		log.Fatal("Failed to initialize folder watcher:", watchErr)
 	}
@@ -65,8 +71,6 @@ func main() {
 	// FileWalker performs boot-time reconciliation between disk state and DB state.
 	walker := &crawler.FileWalker{DB: db, Watch: watcher}
 
-	// Initialize the embedder and searcher
-	emb := embedder.NewEmbedder()  // however you initialize yours
 	searcher := search.NewSearcher(db, emb)
 
 	// Build the application controller that wires together the database,

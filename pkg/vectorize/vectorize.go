@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 )
 
 type Vectorizer struct {
 	DB *sql.DB
+	Embedder *embedder.ONNXEmbedder
 }
 
 // Vectorize processes one file end-to-end: it extracts readable text, breaks that
@@ -39,10 +41,10 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	// Step 2: convert each chunk into a vector embedding that can later be used
 	// for similarity search. The embedding order must match the chunk order so each
 	// stored vector still points to the correct chunk of source text.
-	embed := embedder.NewEmbedder()
-	embeddings, err := embed.Embed(chunks)
-	
+
+	embeddings, err := v.Embedder.Embed(chunks)	
 	if err != nil {
+		log.Println("Failed to embed chunks:", err)
 		return err
 	}
 
@@ -91,16 +93,23 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	for i, chunk := range chunks {
 		var chunkID int
 
-		err = chunkStmt.QueryRow(fileHash, i, chunk).Scan(&chunkID)
+		err = chunkStmt.QueryRow(fileHash, i, chunk.Content).Scan(&chunkID)
 		if err != nil {
 			log.Printf("Failed to insert chunk text %d: %v\n", i, err)
+			return err
+		}
+
+		// The vector extension expects the embedding to be stored as a byte slice in a specific format. This serialization step converts the native Go float32 slice into the binary representation that SQLite can index and search over.
+		vectorBytes, err := sqlite_vec.SerializeFloat32(embeddings[i])
+		if err != nil {
+			log.Printf("Failed to serialize vector %d: %v\n", i, err)
 			return err
 		}
 
 		// Store the embedding using the chunk id produced above. The vector value
 		// must already be in the format expected by the vector extension, so the
 		// embedding generator and the database schema need to agree on representation.
-		_, err = vecStmt.Exec(chunkID, embeddings[i])
+		_, err = vecStmt.Exec(chunkID, vectorBytes)
 		if err != nil {
 			log.Printf("Failed to insert vector %d: %v\n", i, err)
 			return err

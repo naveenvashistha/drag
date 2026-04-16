@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"drag/pkg/embedder"
 	"github.com/fsnotify/fsnotify"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -29,6 +29,7 @@ import (
 type FileWatcher struct {
 	DB           *sql.DB
 	Watcher      *fsnotify.Watcher
+	Embedder *embedder.ONNXEmbedder
 	ProcessQueue chan string
 	ctx          context.Context
 	timers       map[string]*time.Timer
@@ -41,7 +42,7 @@ func (w *FileWatcher) SetContext(ctx context.Context) {
 
 // NewFileWatcher creates the fsnotify instance and allocates an in-memory queue
 // large enough to absorb high event bursts without blocking the producer side.
-func NewFileWatcher(db *sql.DB) (*FileWatcher, error) {
+func NewFileWatcher(db *sql.DB, embedder *embedder.ONNXEmbedder) (*FileWatcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -50,6 +51,7 @@ func NewFileWatcher(db *sql.DB) (*FileWatcher, error) {
 	return &FileWatcher{
 		DB:           db,
 		Watcher:      watcher,
+		Embedder:     embedder,
 		ProcessQueue: make(chan string, 10000),
 		timers:       make(map[string]*time.Timer),
 	}, nil
@@ -346,7 +348,7 @@ func (w *FileWatcher) processFileFast(newPath string) {
 		return
 	}
 
-	vec := &vectorize.Vectorizer{DB: w.DB}
+	vec := &vectorize.Vectorizer{DB: w.DB, Embedder: w.Embedder} // embedder will be initialized inside vectorize to avoid unnecessary initialization when the file is unchanged or missing
 
 	// Search for missing-file candidates with matching size and timestamp same as the incoming file has; these
 	// are potential "ghost" records that may reuse existing vectors by hash.
