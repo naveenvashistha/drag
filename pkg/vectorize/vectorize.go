@@ -27,28 +27,21 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	// chunker breaks that text into smaller windows so embeddings stay within the
 	// model's practical input limits while still preserving nearby context.
 	textContent, err := extractor.ExtractText(filePath)
+	log.Printf("length of text content of file %s: %d\n", filepath.Base(filePath), len(textContent))
 	if err != nil {
 		return err
 	}
 	if len(textContent) == 0 {
+		log.Printf("File %s has no readable content\n", filepath.Base(filePath))
 		return nil
 	}
 	// The chunk size controls how much text is placed into each embedding request.
 	// The overlap keeps a small amount of repeated context between neighboring
 	// chunks so important sentences that cross a boundary are still discoverable.
 	chunks := extractor.ChunkText(textContent, 800, 100, fileHash)
+	log.Printf("Generated %d chunks for file %s\n", len(chunks), filepath.Base(filePath))
 
-	// Step 2: convert each chunk into a vector embedding that can later be used
-	// for similarity search. The embedding order must match the chunk order so each
-	// stored vector still points to the correct chunk of source text.
-
-	embeddings, err := v.Embedder.Embed(chunks)	
-	if err != nil {
-		log.Println("Failed to embed chunks:", err)
-		return err
-	}
-
-	// Step 3: open a transaction so every database write for this file happens as
+	// Step 2: open a transaction so every database write for this file happens as
 	// one atomic unit. If anything fails after this point, the deferred rollback
 	// removes all partially written rows and keeps the database consistent.
 	tx, err := v.DB.Begin()
@@ -87,32 +80,45 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 	}
 	defer vecStmt.Close()
 
-	// Insert each chunk and its embedding pair-by-pair. This keeps the database
-	// relationships explicit: one row stores the chunk text, and a second row stores
-	// the numeric vector that represents that chunk for similarity search.
-	for i, chunk := range chunks {
-		var chunkID int
+	// Process embeddings and inserts in batches to prevent memory exhaustion
+	batchSize := 1000
+	for i := 0; i < len(chunks); i += batchSize {
+		end := i + batchSize
+		if end > len(chunks) {
+			end = len(chunks)
+		}
 
-		err = chunkStmt.QueryRow(fileHash, i, chunk.Content).Scan(&chunkID)
+		batchChunks := chunks[i:end]
+
+		// Embed only the current batch
+		batchEmbeddings, err := v.Embedder.Embed(batchChunks)
 		if err != nil {
-			log.Printf("Failed to insert chunk text %d: %v\n", i, err)
+			log.Println("Failed to embed batch:", err)
 			return err
 		}
 
-		// The vector extension expects the embedding to be stored as a byte slice in a specific format. This serialization step converts the native Go float32 slice into the binary representation that SQLite can index and search over.
-		vectorBytes, err := sqlite_vec.SerializeFloat32(embeddings[i])
-		if err != nil {
-			log.Printf("Failed to serialize vector %d: %v\n", i, err)
-			return err
-		}
+		// Insert only the current batch
+		for j, chunk := range batchChunks {
+			var chunkID int
+			
+			// i+j gives the correct overall chunk_index for the document
+			err = chunkStmt.QueryRow(fileHash, i+j, chunk.Content).Scan(&chunkID)
+			if err != nil {
+				log.Printf("Failed to insert chunk text %d: %v\n", i+j, err)
+				return err
+			}
 
-		// Store the embedding using the chunk id produced above. The vector value
-		// must already be in the format expected by the vector extension, so the
-		// embedding generator and the database schema need to agree on representation.
-		_, err = vecStmt.Exec(chunkID, vectorBytes)
-		if err != nil {
-			log.Printf("Failed to insert vector %d: %v\n", i, err)
-			return err
+			vectorBytes, err := sqlite_vec.SerializeFloat32(batchEmbeddings[j])
+			if err != nil {
+				log.Printf("Failed to serialize vector %d: %v\n", i+j, err)
+				return err
+			}
+
+			_, err = vecStmt.Exec(chunkID, vectorBytes)
+			if err != nil {
+				log.Printf("Failed to insert vector %d: %v\n", i+j, err)
+				return err
+			}
 		}
 	}
 
@@ -153,6 +159,6 @@ func (v *Vectorizer) Vectorize(folderPath string, filePath string, fileHash stri
 		return err
 	}
 
-	log.Printf("Successfully vectorized %d chunks for hash: %s\n", len(chunks), fileHash)
+	log.Printf("Successfully vectorized %d chunks for file %s: %s\n", len(chunks), filepath.Base(filePath), fileHash)
 	return nil
 }

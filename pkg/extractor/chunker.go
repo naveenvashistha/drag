@@ -94,21 +94,25 @@ func ChunkText(text string, chunkSize int, chunkOverlap int, documentHash string
 		// Determine the starting index for the subsequent chunk by applying the overlap offset.
 		nextStart := end - chunkOverlap
 
-		// Forward Progression Guarantee
-		// Ensures the sliding window always advances by at least one character,
-		// preventing infinite loops in extreme edge cases.
-		if nextStart <= i {
-			nextStart = i + 1
-		}
-
 		// Start-Boundary Semantic Snapping
-		// Adjusts the starting index backward to the nearest whitespace to ensure
-		// the next chunk begins precisely at the start of a word.
-		for nextStart > i {
-			if runes[nextStart-1] == ' ' || runes[nextStart-1] == '\n' {
+		foundSpace := false
+		for searchIdx := nextStart; searchIdx > i; searchIdx-- {
+			if runes[searchIdx-1] == ' ' || runes[searchIdx-1] == '\n' {
+				nextStart = searchIdx
+				foundSpace = true
 				break
 			}
-			nextStart--
+		}
+
+		// Forward Progression Guarantee
+		// If no space was found, we MUST force the window forward to prevent infinite loops.
+		if !foundSpace {
+			nextStart = end - chunkOverlap
+		}
+
+		// Absolute fallback to guarantee the loop advances by at least 1 character
+		if nextStart <= i {
+			nextStart = i + 1
 		}
 
 		// Advance the window index for the next iteration.

@@ -2,7 +2,7 @@ package extractor
 
 import (
 	"archive/zip"
-	"bytes"
+	"bufio"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -86,7 +86,7 @@ func ExtractText(filePath string) (string, error) {
 	}
 
 	// 2. Universal Data Hygiene
-	cleanedText := sanitizeText(rawText)
+	cleanedText := strings.TrimSpace(rawText)
 
 	if len(cleanedText) == 0 {
 		return "", ErrEmptyContent
@@ -127,11 +127,32 @@ func sanitizeText(input string) string {
 // NOTE: This assumes an upstream ingestion layer (like a FileWatcher) 
 // has already enforced strict file size limits to prevent memory exhaustion.
 func parsePlainText(path string) (string, error) {
-	content, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	return string(content), nil
+	defer file.Close()
+
+	var builder strings.Builder
+	scanner := bufio.NewScanner(file)
+	
+	// Increase buffer to 10MB to prevent "token too long" errors on minified text
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		cleaned := sanitizeText(line)
+		if len(cleaned) > 0 {
+			builder.WriteString(cleaned)
+			builder.WriteString("\n")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return builder.String(), nil
 }
 
 // parsePDF extracts raw text from PDF binaries. It relies heavily on regex 
@@ -143,28 +164,39 @@ func parsePDF(path string) (string, error) {
 	}
 	defer f.Close()
 
-	var buf bytes.Buffer
-	b, err := r.GetPlainText()
-	if err != nil {
-		return "", err
+	var textBuilder strings.Builder
+	numPages := r.NumPage()
+
+	for i := 1; i <= numPages; i++ {
+		page := r.Page(i)
+		if page.V.IsNull() {
+			continue
+		}
+
+		pageText, err := page.GetPlainText(nil)
+		if err != nil {
+			continue
+		}
+
+		// Apply PDF heuristics only to the current page string
+		cleaned := pdfHyphenRegex.ReplaceAllString(pageText, "$1$2")
+		cleaned = pdfBrokenWordRegex.ReplaceAllString(cleaned, "$1$2")
+		cleaned = strings.ReplaceAll(cleaned, "\n", " ")
+		
+		cleaned = sanitizeText(cleaned)
+
+		if len(cleaned) > 0 {
+			textBuilder.WriteString(cleaned)
+			textBuilder.WriteString(" ")
+		}
 	}
-	buf.ReadFrom(b)
 
-	rawPDFText := buf.String()
-
-	// Silent Failure Detection
-	// The underlying library cannot perform OCR. If the PDF is an image-based scan
-	// or password-protected, it silently returns empty text. This traps that state.
-	if len(strings.TrimSpace(rawPDFText)) == 0 {
-		return "", errors.New("PDF extraction failed: file contains no readable text (it may be an image-based scan or password-protected)")
+	finalText := textBuilder.String()
+	if len(strings.TrimSpace(finalText)) == 0 {
+		return "", errors.New("PDF extraction failed: file contains no readable text")
 	}
 
-	// Sequential heuristic application to reconstruct torn semantics.
-	rawPDFText = pdfHyphenRegex.ReplaceAllString(rawPDFText, "$1$2")
-	rawPDFText = pdfBrokenWordRegex.ReplaceAllString(rawPDFText, "$1$2")
-	rawPDFText = strings.ReplaceAll(rawPDFText, "\n", " ")
-
-	return rawPDFText, nil
+	return finalText, nil
 }
 
 // parseDocx extracts text from Word documents by treating the file as a ZIP archive
@@ -262,7 +294,8 @@ func parsePptx(path string) (string, error) {
 // by reading the XML token-by-token rather than loading the entire DOM into memory.
 func extractXMLText(rc io.ReadCloser) (string, error) {
 	decoder := xml.NewDecoder(rc)
-	var textBuilder strings.Builder
+	var finalBuilder strings.Builder
+	var paraBuilder strings.Builder
 	inTextTag := false
 
 	for {
@@ -276,7 +309,6 @@ func extractXMLText(rc io.ReadCloser) (string, error) {
 
 		switch element := t.(type) {
 		case xml.StartElement:
-			// Office Open XML utilizes the 't' tag for text content (<w:t> or <a:t>).
 			if element.Name.Local == "t" {
 				inTextTag = true
 			}
@@ -284,17 +316,30 @@ func extractXMLText(rc io.ReadCloser) (string, error) {
 			if element.Name.Local == "t" {
 				inTextTag = false
 			} else if element.Name.Local == "p" {
-				// Office Open XML utilizes the 'p' tag for paragraphs (<w:p> or <a:p>).
-				// Injecting a space at the close of a paragraph prevents word collision
-				// between separate paragraphs while preserving intra-word formatting splits.
-				textBuilder.WriteString(" ")
+				// We reached the end of a paragraph. Sanitize just this small block.
+				para := paraBuilder.String()
+				para = sanitizeText(para)
+				if len(para) > 0 {
+					finalBuilder.WriteString(para)
+					finalBuilder.WriteString(" ")
+				}
+				paraBuilder.Reset()
 			}
 		case xml.CharData:
 			if inTextTag {
-				textBuilder.Write(element)
+				paraBuilder.Write(element)
 			}
 		}
 	}
 
-	return textBuilder.String(), nil
+	// Process any trailing text that wasn't enclosed in a paragraph tag
+	trailing := paraBuilder.String()
+	if len(trailing) > 0 {
+		trailing = sanitizeText(trailing)
+		if len(trailing) > 0 {
+			finalBuilder.WriteString(trailing)
+		}
+	}
+
+	return finalBuilder.String(), nil
 }
