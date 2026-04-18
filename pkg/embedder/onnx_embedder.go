@@ -59,7 +59,7 @@ func NewONNXEmbedder() (*ONNXEmbedder, error) {
 		tmpModel.Name(), // onnxFilePath
 		[]string{"input_ids", "attention_mask", "token_type_ids"}, // input names
 		[]string{"last_hidden_state"}, // output names
-		nil, // options
+		nil, // <-- Passed options instead of nil
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load onnx session: %w", err)
