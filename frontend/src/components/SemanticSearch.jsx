@@ -4,6 +4,7 @@ import {
   SetFolderWatchStatus,
   SetFolderVisibility,
   GetFileInfo,
+  Search
 } from "../../wailsjs/go/main/App";
 
 // ── Inline SVG icons ─────────────────────────────────────────────────────────
@@ -50,14 +51,46 @@ function IconFileSmall({ size = 14 }) {
   );
 }
 
+// ── Spinner ──────────────────────────────────────────────────────────────────
+
+function Spinner({ size = 14, color = "var(--accent)" }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 14 14"
+      fill="none" stroke={color} strokeWidth="1.8"
+      strokeLinecap="round"
+      style={{ animation: "spin 0.7s linear infinite", flexShrink: 0 }}
+    >
+      <circle cx="7" cy="7" r="5" strokeOpacity="0.2" />
+      <path d="M7 2a5 5 0 015 5" />
+    </svg>
+  );
+}
+
 // ── Toggle Switch ────────────────────────────────────────────────────────────
 
-function Toggle({ checked, onChange, color = "accent" }) {
+function Toggle({ checked, onChange, color = "accent", loading = false, disabled = false }) {
   return (
-    <label className={`toggle-switch ${color === "green" ? "green" : ""}`}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <div className="toggle-track" />
-      <div className="toggle-thumb" />
+    <label
+      className={`toggle-switch ${color === "green" ? "green" : ""} ${loading || disabled ? "toggle-disabled" : ""}`}
+      style={{ pointerEvents: loading || disabled ? "none" : "auto" }}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => !loading && !disabled && onChange(e.target.checked)}
+        disabled={loading || disabled}
+      />
+      <div className="toggle-track" style={{ opacity: loading ? 0.5 : 1 }} />
+      <div className="toggle-thumb" style={{ opacity: loading ? 0 : 1 }} />
+      {loading && (
+        <div className="toggle-spinner">
+          <Spinner
+            size={10}
+            color={color === "green" ? "var(--green)" : "var(--accent)"}
+          />
+        </div>
+      )}
     </label>
   );
 }
@@ -128,7 +161,7 @@ function formatDate(unixSecs) {
 
 // ── Directory Card ────────────────────────────────────────────────────────────
 
-function DirectoryCard({ path, state, onWatchToggle, onVisibilityToggle }) {
+function DirectoryCard({ path, state, onWatchToggle, onVisibilityToggle, watchLoading, visibilityLoading }) {
   const folderName = path.split(/[\\/]/).pop() || path;
 
   return (
@@ -142,25 +175,39 @@ function DirectoryCard({ path, state, onWatchToggle, onVisibilityToggle }) {
         <div className="dir-toggles">
           {/* Watch Folder */}
           <div className="toggle-row">
-            <span className={`toggle-label ${state.isWatched ? "on" : "off"}`}>
-              Watch Folder · {state.isWatched ? "ON" : "OFF"}
+            <span className={`toggle-label ${watchLoading ? "" : state.isWatched ? "on" : "off"}`}>
+              {watchLoading ? (
+                <span style={{ color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                  <Spinner size={11} color="var(--accent)" /> Updating…
+                </span>
+              ) : (
+                <>Watch Folder · {state.isWatched ? "ON" : "OFF"}</>
+              )}
             </span>
             <Toggle
               checked={state.isWatched}
               onChange={onWatchToggle}
               color="accent"
+              loading={watchLoading}
             />
           </div>
 
           {/* Public Access */}
           <div className="toggle-row">
-            <span className={`toggle-label ${state.isPublic ? "on" : "off"}`}>
-              Public Access · {state.isPublic ? "ON" : "OFF"}
+            <span className={`toggle-label ${visibilityLoading ? "" : state.isPublic ? "on" : "off"}`}>
+              {visibilityLoading ? (
+                <span style={{ color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                  <Spinner size={11} color="var(--green)" /> Updating…
+                </span>
+              ) : (
+                <>Public Access · {state.isPublic ? "ON" : "OFF"}</>
+              )}
             </span>
             <Toggle
               checked={state.isPublic}
               onChange={onVisibilityToggle}
               color="green"
+              loading={visibilityLoading}
             />
           </div>
         </div>
@@ -233,11 +280,8 @@ function ResultsList({ results }) {
           </span>
           <div className="result-info">
             <div className="result-filename">{r.fileName}</div>
-            <div className="result-path">{r.path}</div>
+            <div className="result-path">{r.filePath}</div>
           </div>
-          {r.score !== undefined && (
-            <span className="result-score">{(r.score * 100).toFixed(0)}%</span>
-          )}
         </div>
       ))}
     </div>
@@ -255,6 +299,10 @@ export default function SemanticSearch() {
   const [dirState, setDirState]       = useState(null);
   const [fileInfo, setFileInfo]       = useState(null);
 
+  // ── per-toggle loading states
+  const [watchLoading, setWatchLoading]           = useState(false);
+  const [visibilityLoading, setVisibilityLoading] = useState(false);
+  
   // ── modal state
   const [pendingVisibility, setPendingVisibility] = useState(null); // { targetIsPublic }
 
@@ -320,11 +368,14 @@ export default function SemanticSearch() {
   // ── Watch toggle ────────────────────────────────────────────────────────────
 
   const handleWatchToggle = async (checked) => {
+    setWatchLoading(true);
     try {
       await SetFolderWatchStatus(pathInput.trim(), checked);
       setDirState((s) => ({ ...s, isWatched: checked }));
     } catch (err) {
       setPathError(`Failed to update watch status: ${err}`);
+    } finally {
+      setWatchLoading(false);
     }
   };
 
@@ -337,11 +388,14 @@ export default function SemanticSearch() {
   const handleVisibilityConfirm = async (recursive) => {
     const { targetIsPublic } = pendingVisibility;
     setPendingVisibility(null);
+    setVisibilityLoading(true);
     try {
       await SetFolderVisibility(pathInput.trim(), targetIsPublic, recursive);
       setDirState((s) => ({ ...s, isPublic: targetIsPublic }));
     } catch (err) {
       setPathError(`Failed to update visibility: ${err}`);
+    } finally {
+      setVisibilityLoading(false);
     }
   };
 
@@ -359,14 +413,9 @@ export default function SemanticSearch() {
     setQueryError(null);
 
     try {
-      // TODO: replace with real Wails semantic query call when available.
-      // e.g. const res = await QuerySemantic(query);
-      // For now we return a placeholder so the UI shape is correct.
-      await new Promise((r) => setTimeout(r, 500));
-      setResults([
-        // These will be replaced by real backend results.
-        // Shape: { fileName: string, path: string, score?: number }
-      ]);
+      const res = await Search(query, true);
+      // res is []LocalSearchResult — each item has filePath and fileName
+      setResults(res || []);
     } catch (err) {
       setQueryError(`Query failed: ${err}`);
     } finally {
@@ -436,6 +485,8 @@ export default function SemanticSearch() {
             state={dirState}
             onWatchToggle={handleWatchToggle}
             onVisibilityToggle={handleVisibilityToggle}
+            watchLoading={watchLoading}
+            visibilityLoading={visibilityLoading}
           />
         )}
 
